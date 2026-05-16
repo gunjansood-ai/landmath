@@ -1,50 +1,188 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Search, TrendingUp, MapPin, Clock } from "lucide-react";
+import { Search, TrendingUp, MapPin, Clock, Loader2 } from "lucide-react";
 import Navigation from "@/components/Navigation";
 import { useStore } from "@/store/useStore";
 import { formatCurrency } from "@/lib/calculations";
+import {
+  getAddressSuggestions,
+  geocodePlace,
+  type PlacePrediction,
+} from "@/lib/api/google-places";
 
 export default function Home() {
   const router = useRouter();
   const [address, setAddress] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [suggestions, setSuggestions] = useState<PlacePrediction[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState(-1);
+  const [sessionToken] = useState(() => crypto.randomUUID());
+  const suggestionsRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const debounceRef = useRef<NodeJS.Timeout>(undefined);
   const savedAnalyses = useStore((s) => s.savedAnalyses);
   const setCurrentProperty = useStore((s) => s.setCurrentProperty);
 
-  const handleAnalyze = () => {
-    if (!address.trim()) return;
+  // Fetch suggestions with debounce
+  const fetchSuggestions = useCallback(
+    (input: string) => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (input.length < 3) {
+        setSuggestions([]);
+        setShowSuggestions(false);
+        return;
+      }
+      debounceRef.current = setTimeout(async () => {
+        const results = await getAddressSuggestions(input, sessionToken);
+        setSuggestions(results);
+        setShowSuggestions(results.length > 0);
+        setSelectedIndex(-1);
+      }, 300);
+    },
+    [sessionToken]
+  );
+
+  // Close suggestions on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (
+        suggestionsRef.current &&
+        !suggestionsRef.current.contains(e.target as Node) &&
+        inputRef.current &&
+        !inputRef.current.contains(e.target as Node)
+      ) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const handleSelectSuggestion = async (prediction: PlacePrediction) => {
+    setAddress(prediction.description);
+    setShowSuggestions(false);
+    setSuggestions([]);
+    await analyzeProperty(prediction.placeId, prediction.description);
+  };
+
+  const analyzeProperty = async (placeId: string, displayAddress: string) => {
     setIsAnalyzing(true);
 
-    // Create a property from the address (in production, this would call MLS API)
-    const property = {
-      id: `prop-${Date.now()}`,
-      address: address.trim(),
-      city: "Seattle",
-      state: "WA",
-      zip: "98101",
-      county: "King",
-      lotSizeSqft: 8500,
-      zoningCode: "SF-5000",
-      beds: 3,
-      baths: 2,
-      currentSqft: 1650,
-      yearBuilt: 1965,
-      listingPrice: 850000,
-      taxAssessedValue: 720000,
-      annualPropertyTax: 8400,
-      stories: 1,
-      garage: true,
-      hoaMonthly: 0,
-      floodZone: false,
-    };
+    try {
+      // Step 1: Geocode the place to get lat/lng and parsed address
+      const geo = await geocodePlace(placeId);
 
-    setCurrentProperty(property);
-    setTimeout(() => {
+      if (!geo) {
+        alert("Could not geocode that address. Please try again.");
+        setIsAnalyzing(false);
+        return;
+      }
+
+      // Step 2: Fetch property data from County GIS
+      const propertyRes = await fetch(
+        `/api/property?lat=${geo.lat}&lng=${geo.lng}`
+      );
+      const propertyData = await propertyRes.json();
+
+      // Step 3: Build property object merging all sources
+      const parcel = propertyData.parcel;
+      const zoning = propertyData.zoning;
+      const assessor = propertyData.assessor;
+
+      const property = {
+        id: `prop-${Date.now()}`,
+        address: geo.streetNumber
+          ? `${geo.streetNumber} ${geo.street}`
+          : displayAddress.split(",")[0],
+        city: geo.city || "Unknown",
+        state: geo.state || "WA",
+        zip: geo.zip || "00000",
+        county: geo.county || "King",
+        lotSizeSqft:
+          parcel?.lotSizeSqft ||
+          assessor?.lotSizeSqft ||
+          estimateLotSize(zoning?.currentZone),
+        zoningCode: zoning?.currentZone || assessor?.zoningCode || "SF-5000",
+        beds: assessor?.bedrooms || 3,
+        baths: assessor?.bathrooms || 2,
+        currentSqft: assessor?.sqftLiving || 1500,
+        yearBuilt: assessor?.yearBuilt || 1970,
+        listingPrice:
+          assessor?.totalValue ||
+          estimateValue(geo.city, assessor?.sqftLiving || 1500),
+        taxAssessedValue: assessor?.totalValue || 0,
+        annualPropertyTax: estimateTax(assessor?.totalValue || 500000, geo.county),
+        stories: assessor?.stories || 1,
+        garage: true,
+        hoaMonthly: 0,
+        floodZone: false,
+      };
+
+      setCurrentProperty(property);
       router.push(`/property/${property.id}`);
-    }, 800);
+    } catch (err) {
+      console.error("Analysis failed:", err);
+      alert("Something went wrong fetching property data. Please try again.");
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleAnalyze = async () => {
+    if (!address.trim()) return;
+
+    // If we have a selected suggestion, use it
+    if (suggestions.length > 0 && selectedIndex >= 0) {
+      await handleSelectSuggestion(suggestions[selectedIndex]);
+      return;
+    }
+
+    // If we have suggestions but none selected, use the first one
+    if (suggestions.length > 0) {
+      await handleSelectSuggestion(suggestions[0]);
+      return;
+    }
+
+    // Fallback: try fetching suggestions for the current input and use first result
+    setIsAnalyzing(true);
+    const results = await getAddressSuggestions(address, sessionToken);
+    if (results.length > 0) {
+      await handleSelectSuggestion(results[0]);
+    } else {
+      alert("Could not find that address. Please enter a valid US address.");
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!showSuggestions) {
+      if (e.key === "Enter") handleAnalyze();
+      return;
+    }
+
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        setSelectedIndex((i) => Math.min(i + 1, suggestions.length - 1));
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        setSelectedIndex((i) => Math.max(i - 1, -1));
+        break;
+      case "Enter":
+        e.preventDefault();
+        if (selectedIndex >= 0) {
+          handleSelectSuggestion(suggestions[selectedIndex]);
+        } else if (suggestions.length > 0) {
+          handleSelectSuggestion(suggestions[0]);
+        }
+        break;
+      case "Escape":
+        setShowSuggestions(false);
+        break;
+    }
   };
 
   const recentProperties = savedAnalyses
@@ -78,20 +216,26 @@ export default function Home() {
             Know your ROI before you commit.
           </p>
 
-          {/* Search input */}
+          {/* Search input with autocomplete */}
           <div className="relative w-full max-w-xl mx-auto">
             <div className="relative flex items-center">
               <MapPin
                 size={20}
-                className="absolute left-4 text-gray-400 dark:text-gray-500"
+                className="absolute left-4 text-gray-400 dark:text-gray-500 z-10"
               />
               <input
+                ref={inputRef}
                 type="text"
                 value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleAnalyze()}
+                onChange={(e) => {
+                  setAddress(e.target.value);
+                  fetchSuggestions(e.target.value);
+                }}
+                onKeyDown={handleKeyDown}
+                onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
                 placeholder="Enter a property address..."
                 className="w-full pl-12 pr-32 py-4 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-2xl text-gray-900 dark:text-white placeholder-gray-400 text-base focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent transition-shadow shadow-sm focus:shadow-lg"
+                autoComplete="off"
               />
               <button
                 onClick={handleAnalyze}
@@ -100,10 +244,7 @@ export default function Home() {
               >
                 {isAnalyzing ? (
                   <span className="flex items-center gap-2">
-                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
+                    <Loader2 size={16} className="animate-spin" />
                     Analyzing
                   </span>
                 ) : (
@@ -114,14 +255,64 @@ export default function Home() {
                 )}
               </button>
             </div>
+
+            {/* Autocomplete dropdown */}
+            {showSuggestions && suggestions.length > 0 && (
+              <div
+                ref={suggestionsRef}
+                className="absolute top-full left-0 right-0 mt-2 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl shadow-elevated overflow-hidden z-50"
+              >
+                {suggestions.map((s, i) => (
+                  <button
+                    key={s.placeId}
+                    onClick={() => handleSelectSuggestion(s)}
+                    onMouseEnter={() => setSelectedIndex(i)}
+                    className={`w-full flex items-start gap-3 px-4 py-3 text-left transition-colors ${
+                      i === selectedIndex
+                        ? "bg-green-50 dark:bg-green-900/20"
+                        : "hover:bg-gray-50 dark:hover:bg-slate-700/50"
+                    }`}
+                  >
+                    <MapPin
+                      size={16}
+                      className={`mt-0.5 flex-shrink-0 ${
+                        i === selectedIndex
+                          ? "text-green-600"
+                          : "text-gray-400"
+                      }`}
+                    />
+                    <div>
+                      <p className="text-sm font-medium text-gray-900 dark:text-white">
+                        {s.mainText}
+                      </p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        {s.secondaryText}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+                <div className="px-4 py-2 border-t border-gray-100 dark:border-slate-700">
+                  <p className="text-[10px] text-gray-400 flex items-center gap-1">
+                    <span>Powered by Google</span>
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Quick examples */}
           <div className="flex flex-wrap justify-center gap-2 mt-4">
-            {["1234 Oak St, Bellevue, WA", "567 Pine Ave, Kirkland, WA", "890 Cedar Ln, Renton, WA"].map((example) => (
+            {[
+              "1234 Oak St, Bellevue, WA",
+              "567 Pine Ave, Kirkland, WA",
+              "890 Cedar Ln, Renton, WA",
+            ].map((example) => (
               <button
                 key={example}
-                onClick={() => setAddress(example)}
+                onClick={() => {
+                  setAddress(example);
+                  fetchSuggestions(example);
+                }}
                 className="text-xs px-3 py-1.5 bg-gray-100 dark:bg-slate-800 text-gray-500 dark:text-gray-400 rounded-full hover:bg-gray-200 dark:hover:bg-slate-700 transition-colors"
               >
                 {example}
@@ -154,10 +345,21 @@ export default function Home() {
                       {analysis.property.address}
                     </p>
                     <div className="flex items-center gap-2 mt-1">
-                      <span className={`text-xs font-semibold ${analysis.roi > 15 ? "text-green-600" : analysis.roi > 0 ? "text-amber-600" : "text-red-500"}`}>
-                        {analysis.roi > 0 ? "+" : ""}{analysis.roi.toFixed(1)}% ROI
+                      <span
+                        className={`text-xs font-semibold ${
+                          analysis.roi > 15
+                            ? "text-green-600"
+                            : analysis.roi > 0
+                            ? "text-amber-600"
+                            : "text-red-500"
+                        }`}
+                      >
+                        {analysis.roi > 0 ? "+" : ""}
+                        {analysis.roi.toFixed(1)}% ROI
                       </span>
-                      <span className="text-xs text-gray-400">{formatCurrency(analysis.profit)}</span>
+                      <span className="text-xs text-gray-400">
+                        {formatCurrency(analysis.profit)}
+                      </span>
                     </div>
                     <div className="flex items-center gap-1 mt-1 text-xs text-gray-400">
                       <Clock size={10} />
@@ -176,4 +378,55 @@ export default function Home() {
       </footer>
     </div>
   );
+}
+
+// --- Helper estimation functions (fallbacks when assessor data is unavailable) ---
+
+function estimateLotSize(zoningCode?: string): number {
+  if (!zoningCode) return 7500;
+  // Parse common King County zoning codes
+  const match = zoningCode.match(/(\d+)/);
+  if (match) {
+    const num = parseInt(match[1]);
+    // SF-5000, R-4, etc.
+    if (num < 100) return num * 1000; // R-4 → 4000 sqft (acres assumption)
+    return num; // SF-5000 → 5000 sqft
+  }
+  return 7500;
+}
+
+function estimateValue(city: string, sqft: number): number {
+  // Rough $/sqft by city (2024 WA market)
+  const pricePerSqft: Record<string, number> = {
+    Seattle: 550,
+    Bellevue: 650,
+    Kirkland: 580,
+    Redmond: 560,
+    Renton: 450,
+    Kent: 380,
+    Auburn: 350,
+    Federal_Way: 340,
+    Tacoma: 320,
+    Everett: 380,
+    Bothell: 500,
+    Sammamish: 580,
+    Issaquah: 550,
+    Mercer_Island: 850,
+  };
+
+  const cityKey = city.replace(/\s+/g, "_");
+  const ppsf = pricePerSqft[cityKey] || 450;
+  return Math.round(ppsf * sqft);
+}
+
+function estimateTax(assessedValue: number, county: string): number {
+  // WA property tax rates by county (approximate)
+  const rates: Record<string, number> = {
+    King: 0.0092,
+    Pierce: 0.0112,
+    Snohomish: 0.0098,
+    Kitsap: 0.0105,
+  };
+  const rate = rates[county] || 0.01;
+  return Math.round(assessedValue * rate);
 }

@@ -1,0 +1,53 @@
+import { NextRequest, NextResponse } from "next/server";
+
+const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+
+export async function GET(req: NextRequest) {
+  const placeId = req.nextUrl.searchParams.get("placeId");
+
+  if (!placeId) {
+    return NextResponse.json({ error: "placeId required" }, { status: 400 });
+  }
+
+  if (!API_KEY) {
+    return NextResponse.json({ error: "Google Maps API key not configured" }, { status: 500 });
+  }
+
+  try {
+    const res = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?place_id=${encodeURIComponent(placeId)}&key=${API_KEY}`
+    );
+    const data = await res.json();
+
+    if (data.status !== "OK" || !data.results?.[0]) {
+      return NextResponse.json({ result: null });
+    }
+
+    const result = data.results[0];
+    const components = result.address_components ?? [];
+
+    const getComponent = (type: string, useShort = false): string => {
+      const c = components.find((c: { types: string[]; long_name: string; short_name: string }) =>
+        c.types.includes(type)
+      );
+      return useShort ? c?.short_name ?? "" : c?.long_name ?? "";
+    };
+
+    const parsed = {
+      formattedAddress: result.formatted_address,
+      streetNumber: getComponent("street_number"),
+      street: getComponent("route"),
+      city: getComponent("locality") || getComponent("sublocality"),
+      county: getComponent("administrative_area_level_2").replace(" County", ""),
+      state: getComponent("administrative_area_level_1", true),
+      zip: getComponent("postal_code"),
+      lat: result.geometry.location.lat,
+      lng: result.geometry.location.lng,
+    };
+
+    return NextResponse.json({ result: parsed });
+  } catch (err) {
+    console.error("Geocode failed:", err);
+    return NextResponse.json({ result: null });
+  }
+}
