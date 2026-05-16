@@ -95,7 +95,7 @@ export default function Home() {
         return;
       }
 
-      // Step 2: Fetch property data from County GIS
+      // Step 2: Fetch property data from County GIS (PropertyInfo service)
       const propertyRes = await fetch(
         `/api/property?lat=${geo.lat}&lng=${geo.lng}`
       );
@@ -103,32 +103,56 @@ export default function Home() {
 
       // Step 3: Build property object merging all sources
       const parcel = propertyData.parcel;
-      const zoning = propertyData.zoning;
       const assessor = propertyData.assessor;
+      const marketEstimate = propertyData.marketEstimate;
+
+      // Server-side present use check — skip non-residential
+      if (parcel?.presentUse) {
+        const use = parcel.presentUse.toLowerCase();
+        const nonResidential =
+          use.includes("condo") ||
+          use.includes("apartment") ||
+          use.includes("office") ||
+          use.includes("commercial") ||
+          use.includes("industrial") ||
+          use.includes("retail") ||
+          use.includes("parking");
+        if (nonResidential) {
+          alert(
+            `This property is classified as "${parcel.presentUse}". LandMath is designed for single-family residential and land — this use type isn't supported.`
+          );
+          setIsAnalyzing(false);
+          return;
+        }
+      }
+
+      // Determine best market price: nearby sales median > appraised total > estimate
+      const appraisedTotal = parcel?.appraisedTotal || 0;
+      const bestListPrice =
+        marketEstimate ||
+        (appraisedTotal > 0 ? Math.round(appraisedTotal * 1.1) : null) || // Appraised × 1.1 approximates market
+        estimateValue(geo.city, assessor?.sqftLiving || 1500);
 
       const property = {
         id: `prop-${Date.now()}`,
         address: geo.streetNumber
           ? `${geo.streetNumber} ${geo.street}`
-          : displayAddress.split(",")[0],
-        city: geo.city || "Unknown",
+          : parcel?.address || displayAddress.split(",")[0],
+        city: parcel?.city || geo.city || "Unknown",
         state: geo.state || "WA",
         zip: geo.zip || "00000",
         county: geo.county || "King",
         lotSizeSqft:
           parcel?.lotSizeSqft ||
-          assessor?.lotSizeSqft ||
-          estimateLotSize(zoning?.currentZone),
-        zoningCode: zoning?.currentZone || assessor?.zoningCode || "SF-5000",
+          estimateLotSize(parcel?.zoningCode),
+        zoningCode: parcel?.zoningCode || "Unknown",
         beds: assessor?.bedrooms || 3,
         baths: assessor?.bathrooms || 2,
         currentSqft: assessor?.sqftLiving || 1500,
         yearBuilt: assessor?.yearBuilt || 1970,
-        listingPrice:
-          assessor?.totalValue ||
-          estimateValue(geo.city, assessor?.sqftLiving || 1500),
-        taxAssessedValue: assessor?.totalValue || 0,
-        annualPropertyTax: estimateTax(assessor?.totalValue || 500000, geo.county),
+        listingPrice: bestListPrice,
+        taxAssessedValue: appraisedTotal,
+        annualPropertyTax: estimateTax(appraisedTotal || bestListPrice, geo.county),
         stories: assessor?.stories || 1,
         garage: true,
         hoaMonthly: 0,
