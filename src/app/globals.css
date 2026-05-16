@@ -1,33 +1,35 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@config "../../tailwind.config.ts";
 
-:root {
-  --background: #ffffff;
-  --foreground: #111827;
-  --card-bg: #ffffff;
-  --card-border: #e5e7eb;
-  --muted: #6b7280;
-  --accent: #16a34a;
-  --accent-light: #dcfce7;
-}
+/* Dark mode variant for class-based toggling */
+@variant dark (&:where(.dark, .dark *));
 
-.dark {
-  --background: #0f172a;
-  --foreground: #f1f5f9;
-  --card-bg: #1e293b;
-  --card-border: #334155;
-  --muted: #94a3b8;
-  --accent: #4ade80;
-  --accent-light: #14532d;
-}
+@layer base {
+  :root {
+    --background: #ffffff;
+    --foreground: #111827;
+    --card-bg: #ffffff;
+    --card-border: #e5e7eb;
+    --muted: #6b7280;
+    --accent: #16a34a;
+    --accent-light: #dcfce7;
+  }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: 'Inter', system-ui, sans-serif;
+  .dark {
+    --background: #0f172a;
+    --foreground: #f1f5f9;
+    --card-bg: #1e293b;
+    --card-border: #334155;
+    --muted: #94a3b8;
+    --accent: #4ade80;
+    --accent-light: #14532d;
+  }
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+  }
 }
 
 @layer utilities {
