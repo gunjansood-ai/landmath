@@ -28,7 +28,10 @@ import {
   STRATEGIES,
   QUALITY_TIERS,
   DEFAULT_COST_PER_SQFT,
+  DEFAULT_SELL_PRICE_PER_SQFT,
+  getDefaultBuildSqft,
   calculateMonthlyPayment,
+  StrategyOverrides,
 } from "@/lib/calculations";
 
 const strategyIcons: Record<Strategy, React.ReactNode> = {
@@ -83,6 +86,21 @@ export default function PropertyAnalysis() {
     points: 0,
   });
 
+  // Per-strategy overrides for build sqft and sell price/sqft
+  const [strategyOverrides, setStrategyOverrides] = useState<
+    Partial<Record<Strategy, StrategyOverrides>>
+  >({});
+
+  const updateOverride = (strategy: Strategy, field: keyof StrategyOverrides, value: number | undefined) => {
+    setStrategyOverrides((prev) => ({
+      ...prev,
+      [strategy]: {
+        ...prev[strategy],
+        [field]: value,
+      },
+    }));
+  };
+
   // Update cost when tier changes
   const handleTierChange = (tier: QualityTier) => {
     setQualityTier(tier);
@@ -92,8 +110,8 @@ export default function PropertyAnalysis() {
   // Run analysis
   const { analyses, recommended } = useMemo(() => {
     if (!property) return { analyses: [], recommended: "pass" as Strategy };
-    return analyzeAllStrategies(property, qualityTier, costPerSqft, financing);
-  }, [property, qualityTier, costPerSqft, financing]);
+    return analyzeAllStrategies(property, qualityTier, costPerSqft, financing, strategyOverrides);
+  }, [property, qualityTier, costPerSqft, financing, strategyOverrides]);
 
   // Save to store
   useEffect(() => {
@@ -342,6 +360,52 @@ export default function PropertyAnalysis() {
                         {analysis.timelineMonths}mo
                       </p>
                     </div>
+                  </div>
+
+                  {/* Per-strategy overrides: Build Sqft + Sell $/sqft */}
+                  <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 p-3 bg-gray-50 dark:bg-slate-700/50 rounded-xl">
+                    <div className="flex items-center gap-1.5">
+                      <label className="text-[10px] uppercase tracking-wider text-gray-400 font-medium whitespace-nowrap">Build</label>
+                      <input
+                        type="number"
+                        value={strategyOverrides[analysis.strategy]?.buildSqft ?? analysis.buildSqft}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          updateOverride(analysis.strategy, "buildSqft", v > 0 ? v : undefined);
+                        }}
+                        className="w-20 px-2 py-1 text-xs bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white text-right"
+                      />
+                      <span className="text-[10px] text-gray-400">sqft</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <label className="text-[10px] uppercase tracking-wider text-gray-400 font-medium whitespace-nowrap">Sell</label>
+                      <span className="text-[10px] text-gray-400">$</span>
+                      <input
+                        type="number"
+                        value={
+                          strategyOverrides[analysis.strategy]?.sellPricePerSqft ??
+                          (analysis.buildSqft > 0 ? Math.round(analysis.expectedSalePrice / analysis.buildSqft) : DEFAULT_SELL_PRICE_PER_SQFT[qualityTier])
+                        }
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          updateOverride(analysis.strategy, "sellPricePerSqft", v > 0 ? v : undefined);
+                        }}
+                        className="w-20 px-2 py-1 text-xs bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white text-right"
+                      />
+                      <span className="text-[10px] text-gray-400">/sqft</span>
+                    </div>
+                    {(strategyOverrides[analysis.strategy]?.buildSqft || strategyOverrides[analysis.strategy]?.sellPricePerSqft) && (
+                      <button
+                        onClick={() => setStrategyOverrides((prev) => {
+                          const next = { ...prev };
+                          delete next[analysis.strategy];
+                          return next;
+                        })}
+                        className="text-[10px] text-gray-400 hover:text-red-500 underline ml-auto"
+                      >
+                        Reset
+                      </button>
+                    )}
                   </div>
 
                   {/* Timeline bar */}

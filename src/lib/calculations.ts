@@ -218,19 +218,41 @@ function estimateSalePrice(
   }
 }
 
+// Default sale price per sqft by tier (exported for UI hints)
+export const DEFAULT_SELL_PRICE_PER_SQFT: Record<QualityTier, number> = {
+  standard: 350,
+  premium: 500,
+  luxury: 700,
+  ultra_luxury: 1000,
+};
+
+// Get the default buildable sqft for a strategy (exported for UI hints)
+export function getDefaultBuildSqft(property: PropertyData, strategy: Strategy): number {
+  return Math.round(getMaxBuildableSqft(property, strategy));
+}
+
+// Per-strategy overrides
+export interface StrategyOverrides {
+  buildSqft?: number;
+  sellPricePerSqft?: number;
+}
+
 // Main analysis calculation
 export function calculateAnalysis(
   property: PropertyData,
   strategy: Strategy,
   tier: QualityTier,
   costPerSqft: number,
-  financing: FinancingConfig
+  financing: FinancingConfig,
+  overrides?: StrategyOverrides
 ): AnalysisResult {
   const feasibility = checkFeasibility(property, strategy);
-  const buildSqft = getMaxBuildableSqft(property, strategy);
+  const buildSqft = overrides?.buildSqft ?? getMaxBuildableSqft(property, strategy);
   const permitMonths = getPermitMonths(strategy);
   const buildMonths = getBuildMonths(strategy, tier, buildSqft);
-  const expectedSalePrice = estimateSalePrice(property, strategy, tier, buildSqft);
+  const expectedSalePrice = overrides?.sellPricePerSqft
+    ? buildSqft * overrides.sellPricePerSqft
+    : estimateSalePrice(property, strategy, tier, buildSqft);
   const sellMonths = Math.ceil(getSellMonths(tier, expectedSalePrice));
   const timelineMonths = permitMonths + buildMonths + sellMonths;
 
@@ -330,11 +352,12 @@ export function analyzeAllStrategies(
   property: PropertyData,
   tier: QualityTier,
   costPerSqft: number,
-  financing: FinancingConfig
+  financing: FinancingConfig,
+  strategyOverrides?: Partial<Record<Strategy, StrategyOverrides>>
 ): { analyses: AnalysisResult[]; recommended: Strategy } {
   const strategies: Strategy[] = ["fresh_build", "split_build", "main_adu", "flip_fix"];
   const analyses = strategies.map((s) =>
-    calculateAnalysis(property, s, tier, costPerSqft, financing)
+    calculateAnalysis(property, s, tier, costPerSqft, financing, strategyOverrides?.[s])
   );
 
   // Score and rank
