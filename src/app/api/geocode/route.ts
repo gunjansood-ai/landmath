@@ -37,12 +37,14 @@ export async function GET(req: NextRequest) {
       formattedAddress: result.formatted_address,
       streetNumber: getComponent("street_number"),
       street: getComponent("route"),
+      unit: getComponent("subpremise"), // apt/unit number — indicates condo/multi-unit
       city: getComponent("locality") || getComponent("sublocality"),
       county: getComponent("administrative_area_level_2").replace(" County", ""),
       state: getComponent("administrative_area_level_1", true),
       zip: getComponent("postal_code"),
       lat: result.geometry.location.lat,
       lng: result.geometry.location.lng,
+      placeTypes: result.types ?? [], // e.g. ["subpremise", "premise"]
     };
 
     return NextResponse.json({ result: parsed });

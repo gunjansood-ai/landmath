@@ -81,6 +81,20 @@ export default function Home() {
         return;
       }
 
+      // Condo/unit detection — skip these, they don't work for land/build analysis
+      const isCondo =
+        !!geo.unit || // has apt/unit number
+        geo.placeTypes?.includes("subpremise") ||
+        /\b(apt|unit|suite|ste|#)\b/i.test(displayAddress);
+
+      if (isCondo) {
+        alert(
+          "This looks like a condo or apartment unit. LandMath is designed for houses and land — condo analysis isn't supported yet."
+        );
+        setIsAnalyzing(false);
+        return;
+      }
+
       // Step 2: Fetch property data from County GIS
       const propertyRes = await fetch(
         `/api/property?lat=${geo.lat}&lng=${geo.lng}`

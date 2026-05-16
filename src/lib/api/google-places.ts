@@ -14,12 +14,14 @@ export interface GeocodedAddress {
   formattedAddress: string;
   streetNumber: string;
   street: string;
+  unit: string; // apt/unit number — non-empty means condo/multi-unit
   city: string;
   county: string;
   state: string;
   zip: string;
   lat: number;
   lng: number;
+  placeTypes: string[];
 }
 
 /** Autocomplete address suggestions */

@@ -18,6 +18,7 @@ import {
   TrendingUp,
   ChevronDown,
   ChevronUp,
+  ExternalLink,
 } from "lucide-react";
 import Navigation from "@/components/Navigation";
 import { useStore, Strategy, QualityTier, FinancingConfig } from "@/store/useStore";
@@ -99,6 +100,15 @@ export default function PropertyAnalysis() {
         [field]: value,
       },
     }));
+  };
+
+  // Build Redfin search URL for nearby sold comps
+  const getRedfin = () => {
+    if (!property) return "#";
+    const city = property.city.toLowerCase().replace(/\s+/g, "-");
+    const state = property.state.toUpperCase();
+    // Redfin sold listings search — pre-filtered to the city
+    return `https://www.redfin.com/city/${city}-${state}/filter/sort=lo-days,property-type=house,status=sold-3mo`;
   };
 
   // Update cost when tier changes
@@ -393,6 +403,14 @@ export default function PropertyAnalysis() {
                         className="w-20 px-2 py-1 text-xs bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white text-right"
                       />
                       <span className="text-[10px] text-gray-400">/sqft</span>
+                      <a
+                        href={getRedfin()}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-0.5 text-[10px] text-blue-500 hover:text-blue-700 underline whitespace-nowrap"
+                      >
+                        View comps <ExternalLink size={9} />
+                      </a>
                     </div>
                     {(strategyOverrides[analysis.strategy]?.buildSqft || strategyOverrides[analysis.strategy]?.sellPricePerSqft) && (
                       <button
