@@ -21,6 +21,7 @@ interface PermitRadarProps {
   lat: number;
   lng: number;
   address: string;
+  city?: string;
 }
 
 const CATEGORY_CONFIG: Record<
@@ -172,7 +173,7 @@ function PermitRow({ permit }: { permit: PermitRecord }) {
   );
 }
 
-export default function PermitRadar({ lat, lng, address }: PermitRadarProps) {
+export default function PermitRadar({ lat, lng, address, city }: PermitRadarProps) {
   const [data, setData] = useState<PermitRadarResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(true);
@@ -187,8 +188,9 @@ export default function PermitRadar({ lat, lng, address }: PermitRadarProps) {
   async function load(lookbackDays: number) {
     setLoading(true);
     try {
+      const cityParam = city ? `&city=${encodeURIComponent(city)}` : "";
       const res = await fetch(
-        `/api/permits?lat=${lat}&lng=${lng}&radius=1.0&days=${lookbackDays}`
+        `/api/permits?lat=${lat}&lng=${lng}&radius=1.0&days=${lookbackDays}${cityParam}`
       );
       if (res.ok) {
         const json = await res.json();
@@ -282,13 +284,24 @@ export default function PermitRadar({ lat, lng, address }: PermitRadarProps) {
             <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
               <div className="flex items-start gap-2">
                 <AlertTriangle size={14} className="text-amber-600 mt-0.5 flex-shrink-0" />
-                <div>
+                <div className="flex-1">
                   <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
-                    Permit data unavailable for this area
+                    Permit data unavailable for {data.cityName ?? "this area"}
                   </p>
                   <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">
-                    Permit Radar currently supports Seattle, WA. Support for additional cities is coming soon.
+                    Permit Radar supports Seattle and Bellevue. More KC cities coming soon.
                   </p>
+                  {data.portalUrl && (
+                    <a
+                      href={data.portalUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 mt-2 text-xs font-medium text-amber-700 dark:text-amber-400 underline underline-offset-2 hover:text-amber-900"
+                    >
+                      <MapPin size={10} />
+                      Search {data.cityName ?? ""} permit portal →
+                    </a>
+                  )}
                 </div>
               </div>
             </div>

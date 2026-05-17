@@ -93,6 +93,8 @@ export interface PropertyData {
   /** Geocoded coordinates — used for Permit Radar and map features. */
   lat?: number;
   lng?: number;
+  /** Where the listingPrice came from. Shown in the UI so users can gauge confidence. */
+  priceSource?: "apillow_listing" | "apillow_zestimate" | "neighborhood_median" | "appraised" | "estimate";
 }
 
 export interface FinancingConfig {

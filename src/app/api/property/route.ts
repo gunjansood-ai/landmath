@@ -259,6 +259,40 @@ async function lookupApiillowByAddress(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Address normalisation helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * KC GIS returns addresses in ALL CAPS ("17426 SE 60TH ST", "BELLEVUE").
+ * APIllow matches much better on title-cased input ("17426 SE 60th St").
+ *
+ * Rules:
+ *  - Always capitalise the first letter of each word.
+ *  - Keep known directional abbreviations (NE, SW, SE, NW, N, S, E, W) uppercase.
+ *  - Keep street-type abbreviations (ST, AVE, DR, RD, PL, CT, LN, WAY, BLVD,
+ *    PKWY, TER, CIR, LOOP, HWY) uppercase so Zillow/APIllow recognises them.
+ *  - Ordinals (60TH, 1ST, 2ND, 3RD) stay uppercase.
+ */
+const KEEP_UPPER = new Set([
+  "NE","NW","SE","SW","N","S","E","W",
+  "ST","AVE","DR","RD","PL","CT","LN","WAY","BLVD","PKWY","TER","CIR","LOOP","HWY","FWY",
+]);
+const ORDINAL_RE = /^\d+(ST|ND|RD|TH)$/i;
+
+function toTitleCaseAddress(s: string): string {
+  return s
+    .trim()
+    .split(/\s+/)
+    .map((word) => {
+      const up = word.toUpperCase();
+      if (KEEP_UPPER.has(up)) return up;
+      if (ORDINAL_RE.test(up)) return up;
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(" ");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PropertyInfo helpers (King County GIS)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -654,10 +688,41 @@ export async function GET(req: NextRequest) {
       ((kcParcel!.CTYNAME as string)?.trim() ||
         (kcParcel!.POSTALCTYNAME as string)?.trim()) ?? null;
 
-    const [assessor, neighborhood] = await Promise.all([
+    // Build a full address string for the subject so we can look it up on
+    // APIllow and get the live listing price (or Zestimate). KC GIS returns
+    // addresses in ALL CAPS ("17426 SE 60TH ST", "BELLEVUE") — normalise to
+    // title case so APIllow/Zillow matching works reliably.
+    const kcStreetAddr = (kcParcel!.ADDR_FULL as string)?.trim() ?? null;
+    const subjectFullAddress =
+      kcStreetAddr && subjectCity
+        ? `${toTitleCaseAddress(kcStreetAddr)}, ${toTitleCaseAddress(subjectCity)}, WA`
+        : null;
+
+    const [assessor, neighborhood, subjectApiillow] = await Promise.all([
       subjectPin ? getAssessorDetails(subjectPin) : Promise.resolve(null),
       buildNeighborhood(lat, lng, subjectPin, subjectCity, true, "WA"),
+      subjectFullAddress
+        ? lookupApiillowByAddress(subjectFullAddress)
+        : Promise.resolve(null),
     ]);
+
+    // subjectListPrice: prefer active listing price, then Zestimate, then null.
+    // This is the price of THIS property — not the neighborhood median.
+    const subjectListPrice: number | null =
+      (subjectApiillow?.price && subjectApiillow.price > 50000
+        ? subjectApiillow.price
+        : null) ??
+      (subjectApiillow?.zestimate && subjectApiillow.zestimate > 50000
+        ? subjectApiillow.zestimate
+        : null) ??
+      null;
+
+    const priceSource: "apillow_listing" | "apillow_zestimate" | "neighborhood_median" | "appraised" | "estimate" =
+      subjectApiillow?.price && subjectApiillow.price > 50000
+        ? "apillow_listing"
+        : subjectApiillow?.zestimate && subjectApiillow.zestimate > 50000
+        ? "apillow_zestimate"
+        : "neighborhood_median";
 
     const marketEstimate =
       neighborhood.sales.length > 0
@@ -671,6 +736,8 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       isKingCounty: true,
+      subjectListPrice,
+      priceSource,
       parcel: {
         pin: kcParcel!.PIN,
         address: kcParcel!.ADDR_FULL,
@@ -773,8 +840,27 @@ export async function GET(req: NextRequest) {
         })()
       : null;
 
+  // Non-KC: subject price from APIllow direct lookup (same logic as KC path).
+  const nonKcSubjectListPrice: number | null =
+    (apiillowDetail?.price && apiillowDetail.price > 50000
+      ? apiillowDetail.price
+      : null) ??
+    (apiillowDetail?.zestimate && apiillowDetail.zestimate > 50000
+      ? apiillowDetail.zestimate
+      : null) ??
+    null;
+
+  const nonKcPriceSource =
+    apiillowDetail?.price && apiillowDetail.price > 50000
+      ? "apillow_listing"
+      : apiillowDetail?.zestimate && apiillowDetail.zestimate > 50000
+      ? "apillow_zestimate"
+      : "neighborhood_median";
+
   return NextResponse.json({
     isKingCounty: false,
+    subjectListPrice: nonKcSubjectListPrice,
+    priceSource: nonKcPriceSource,
     parcel: syntheticParcel,
     sales: neighborhood.sales.slice(0, 5).map((c) => ({
       address: c.address,

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo, useCallback } from "react";
+import React from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -23,6 +24,7 @@ import {
   Rows3,
   Star,
   RefreshCw,
+  Pencil,
 } from "lucide-react";
 import Navigation from "@/components/Navigation";
 import DealNarrator from "@/components/DealNarrator";
@@ -768,6 +770,102 @@ function MultiFamilyDetail({
   );
 }
 
+// ─── Editable Ask Price chip ──────────────────────────────────────────────────
+
+const PRICE_SOURCE_LABELS: Record<string, { label: string; color: string }> = {
+  apillow_listing: { label: "Live listing", color: "text-green-600 dark:text-green-400" },
+  apillow_zestimate: { label: "Zestimate", color: "text-blue-500 dark:text-blue-400" },
+  neighborhood_median: { label: "Comp median", color: "text-amber-600 dark:text-amber-400" },
+  appraised: { label: "Assessed", color: "text-amber-600 dark:text-amber-400" },
+  estimate: { label: "Estimate", color: "text-gray-400" },
+};
+
+function AskPriceChip({
+  listingPrice,
+  priceSource,
+  override,
+  onOverride,
+}: {
+  listingPrice: number;
+  priceSource?: string;
+  override?: number;
+  onOverride: (v: number | undefined) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [raw, setRaw] = useState("");
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  const displayPrice = override ?? listingPrice;
+  const isOverridden = override !== undefined && override !== listingPrice;
+  const srcKey = priceSource ?? "estimate";
+  const srcMeta = PRICE_SOURCE_LABELS[srcKey] ?? PRICE_SOURCE_LABELS.estimate;
+
+  function startEdit() {
+    setRaw(String(Math.round(displayPrice / 1000)));
+    setEditing(true);
+    setTimeout(() => inputRef.current?.select(), 0);
+  }
+
+  function commit() {
+    const k = parseFloat(raw.replace(/[^0-9.]/g, ""));
+    if (!isNaN(k) && k > 0) {
+      const dollars = Math.round(k * 1000);
+      onOverride(dollars === listingPrice ? undefined : dollars);
+    }
+    setEditing(false);
+  }
+
+  return (
+    <div
+      className={`flex-shrink-0 bg-white dark:bg-slate-800 border rounded-xl px-3 py-2 cursor-pointer group ${
+        isOverridden
+          ? "border-blue-400 dark:border-blue-500"
+          : "border-gray-100 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-600"
+      }`}
+      onClick={() => !editing && startEdit()}
+      title="Click to override ask price"
+    >
+      <div className="flex items-center gap-1">
+        <p className="text-[10px] text-gray-400">Ask</p>
+        {!editing && (
+          <span className={`text-[9px] font-medium ${isOverridden ? "text-blue-500" : srcMeta.color}`}>
+            {isOverridden ? "edited" : srcMeta.label}
+          </span>
+        )}
+      </div>
+      {editing ? (
+        <div className="flex items-center gap-0.5">
+          <span className="text-xs text-gray-400">$</span>
+          <input
+            ref={inputRef}
+            type="number"
+            value={raw}
+            onChange={(e) => setRaw(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false); }}
+            className="w-16 text-xs font-bold bg-transparent text-gray-900 dark:text-white outline-none"
+            placeholder="850"
+          />
+          <span className="text-xs text-gray-400">K</span>
+        </div>
+      ) : (
+        <p className="text-xs font-bold text-gray-900 dark:text-white flex items-center gap-1">
+          ${(displayPrice / 1000).toFixed(0)}K
+          <Pencil size={9} className="text-gray-300 dark:text-gray-600 group-hover:text-blue-400 transition-colors" />
+        </p>
+      )}
+      {isOverridden && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onOverride(undefined); }}
+          className="text-[9px] text-blue-400 hover:text-blue-600 leading-none mt-0.5"
+        >
+          reset
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ─── Accordion wrapper ────────────────────────────────────────────────────────
 
 function Accordion({ label, defaultOpen = false, children }: { label: string; defaultOpen?: boolean; children: React.ReactNode }) {
@@ -989,8 +1087,14 @@ export default function PropertyAnalysis() {
 
         {/* Property stats bar */}
         <div className="flex gap-2 overflow-x-auto scrollbar-hide mb-5 pb-1">
+          {/* Ask price — editable chip */}
+          <AskPriceChip
+            listingPrice={property.listingPrice}
+            priceSource={property.priceSource}
+            override={listPriceOverride}
+            onOverride={setListPriceOverride}
+          />
           {[
-            { label: "Ask", value: `$${(property.listingPrice / 1000).toFixed(0)}K` },
             { label: "Lot", value: `${property.lotSizeSqft.toLocaleString()} sqft` },
             { label: "Zone", value: property.zoningCode },
             { label: "Home", value: `${property.beds}bd/${property.baths}ba` },
@@ -1275,7 +1379,7 @@ export default function PropertyAnalysis() {
           {/* Permit Radar */}
           {property.lat && property.lng && (
             <Accordion label="🚧 Permit Radar">
-              <PermitRadar lat={property.lat} lng={property.lng} address={property.address} />
+              <PermitRadar lat={property.lat} lng={property.lng} address={property.address} city={property.city} />
             </Accordion>
           )}
 

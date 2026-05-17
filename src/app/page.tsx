@@ -105,6 +105,13 @@ export default function Home() {
       const parcel = propertyData.parcel;
       const assessor = propertyData.assessor;
       const marketEstimate = propertyData.marketEstimate;
+      // subjectListPrice: APIllow active listing price or Zestimate for THIS property.
+      // Much more accurate than the neighborhood median for properties on the market.
+      const subjectListPrice: number | null = propertyData.subjectListPrice ?? null;
+      const priceSource: "apillow_listing" | "apillow_zestimate" | "neighborhood_median" | "appraised" | "estimate" =
+        (["apillow_listing", "apillow_zestimate", "neighborhood_median", "appraised", "estimate"] as const).includes(propertyData.priceSource)
+          ? propertyData.priceSource
+          : "estimate";
 
       // Server-side present use check — skip non-residential
       if (parcel?.presentUse) {
@@ -126,11 +133,16 @@ export default function Home() {
         }
       }
 
-      // Determine best market price: nearby sales median > appraised total > estimate
+      // Price priority:
+      //  1. subjectListPrice — APIllow's price (active listing) or Zestimate for this specific property
+      //  2. marketEstimate   — median of nearby sold comps (neighbourhood, not this house)
+      //  3. appraisedTotal × 1.1 — KC assessed value grossed up to approximate market
+      //  4. estimateValue()  — flat ZIP-table fallback
       const appraisedTotal = parcel?.appraisedTotal || 0;
       const bestListPrice =
+        subjectListPrice ||
         marketEstimate ||
-        (appraisedTotal > 0 ? Math.round(appraisedTotal * 1.1) : null) || // Appraised × 1.1 approximates market
+        (appraisedTotal > 0 ? Math.round(appraisedTotal * 1.1) : null) ||
         estimateValue(geo.city, assessor?.sqftLiving || 1500);
 
       const property = {
@@ -151,6 +163,7 @@ export default function Home() {
         currentSqft: assessor?.sqftLiving || 1500,
         yearBuilt: assessor?.yearBuilt || 1970,
         listingPrice: bestListPrice,
+        priceSource,
         taxAssessedValue: appraisedTotal,
         annualPropertyTax: estimateTax(appraisedTotal || bestListPrice, geo.county),
         stories: assessor?.stories || 1,
