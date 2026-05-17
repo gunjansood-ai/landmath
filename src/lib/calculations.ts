@@ -309,69 +309,309 @@ const DEFAULT_FLIP_PRICE_PER_SQFT: Record<QualityTier, number> = {
 };
 
 // ─── ZIP-level new-construction $/sqft overrides ─────────────────────────────
-// When the comp pipeline is unavailable (APIllow down, no KC sqft data),
-// we still want SOMETHING smarter than a flat WA average for known luxury
-// ZIPs. These represent typical NEW-CONSTRUCTION sale prices (premium tier
+// When the comp pipeline is unavailable (APIllow down, no sqft data),
+// we still want SOMETHING smarter than a flat national average for known
+// markets. These represent typical NEW-CONSTRUCTION sale prices (premium tier
 // baseline) by ZIP. Tier multiplier is applied on top for luxury/ultra.
 //
-// Numbers from 2025–2026 Redfin / Zillow per-sqft data for new builds in
-// each ZIP. Conservative midpoints — actual luxury builds can exceed by
-// 30–50%. Better than nothing, worse than real comps.
-const WA_ZIP_NEW_CONSTRUCTION_PPSF: Record<string, number> = {
+// Numbers from 2025–2026 Redfin / Zillow per-sqft data for new builds.
+// Conservative midpoints — actual luxury builds can exceed by 30–50%.
+// Better than nothing, worse than real comps.
+const ZIP_NEW_CONSTRUCTION_PPSF: Record<string, number> = {
+  // ── Washington State ─────────────────────────────────────────────────────
   // Bellevue / Eastside premium
-  "98004": 1100, // Bridle Trails / Yarrow Bay / Vuecrest
+  "98004": 1100, // Bridle Trails / Yarrow Bay
   "98005": 700,  // Crossroads / Lake Hills
   "98006": 700,  // Newport / Factoria
   "98007": 650,
   "98008": 650,  // Lake Hills / Crossroads
-  // Medina / Clyde Hill / Hunts Point — ultra
-  "98039": 1500,
-  // Mercer Island
-  "98040": 1000,
-  // Kirkland
-  "98033": 850,
-  "98034": 700,
-  // Redmond
-  "98052": 700,
-  "98053": 750,
-  // Sammamish
-  "98074": 700,
-  "98075": 700,
-  // Issaquah
-  "98027": 650,
-  "98029": 700,
-  // Seattle premium
-  "98109": 850, // Queen Anne / South Lake Union
-  "98112": 950, // Madison Park / Madrona / Capitol Hill
-  "98119": 850, // Queen Anne North
-  "98199": 850, // Magnolia
-  "98115": 700, // View Ridge / Wedgwood
-  "98117": 700, // Ballard / Loyal Heights
-  "98103": 700, // Greenwood / Fremont / Wallingford
-  "98105": 800, // Laurelhurst / University District
-  "98144": 700, // Mt Baker / Beacon Hill
-  // Seattle mid
-  "98107": 650,
+  "98039": 1500, // Medina / Clyde Hill / Hunts Point
+  "98040": 1000, // Mercer Island
+  "98033": 850,  // Kirkland
+  "98034": 700,  // Kirkland east
+  "98052": 700,  // Redmond
+  "98053": 750,  // Redmond east
+  "98074": 700,  // Sammamish
+  "98075": 700,  // Sammamish east
+  "98027": 650,  // Issaquah
+  "98029": 700,  // Issaquah Highlands
+  // Seattle
+  "98109": 850,  // Queen Anne / South Lake Union
+  "98112": 950,  // Madison Park / Madrona
+  "98119": 850,  // Queen Anne North
+  "98199": 850,  // Magnolia
+  "98115": 700,  // View Ridge / Wedgwood
+  "98117": 700,  // Ballard / Loyal Heights
+  "98103": 700,  // Greenwood / Fremont / Wallingford
+  "98105": 800,  // Laurelhurst / U-District
+  "98144": 700,  // Mt Baker / Beacon Hill
+  "98107": 650,  // Ballard
   "98108": 600,
-  "98116": 700, // West Seattle premium
-  "98136": 650, // West Seattle
-  "98122": 700, // Capitol Hill / Central District
-  "98102": 800, // Eastlake / Capitol Hill
+  "98116": 700,  // West Seattle premium
+  "98136": 650,  // West Seattle
+  "98122": 700,  // Capitol Hill / Central District
+  "98102": 800,  // Eastlake / Capitol Hill
   "98106": 550,
   "98118": 600,
   "98125": 600,
   "98126": 600,
   "98133": 550,
-  // Tacoma area
-  "98402": 400, // Downtown Tacoma
-  "98403": 500, // Stadium / Old Town
+  // Tacoma
+  "98402": 400,  // Downtown Tacoma
+  "98403": 500,  // Stadium / Old Town
   "98405": 400,
-  "98406": 500, // West End
-  "98407": 600, // North Tacoma
-  "98422": 500, // NE Tacoma
+  "98406": 500,  // West End
+  "98407": 600,  // North Tacoma
+  "98422": 500,  // NE Tacoma
   // Spokane
-  "99203": 350, // South Hill premium
-  "99201": 350, // Downtown
+  "99203": 350,  // South Hill premium
+  "99201": 350,  // Downtown Spokane
+  // ── California — Bay Area ─────────────────────────────────────────────────
+  "94010": 1200, // Burlingame
+  "94025": 1300, // Menlo Park
+  "94027": 1800, // Atherton
+  "94028": 1100, // Portola Valley
+  "94062": 1100, // Redwood City
+  "94301": 1400, // Palo Alto
+  "94303": 1200, // Palo Alto east
+  "94305": 1300, // Stanford
+  "94401": 1200, // San Mateo
+  "94402": 1100, // San Mateo west
+  "94501": 800,  // Alameda
+  "94502": 800,  // Alameda east
+  "94506": 850,  // Danville
+  "94507": 900,  // Alamo
+  "94526": 850,  // Danville
+  "94556": 750,  // Moraga
+  "94563": 900,  // Orinda
+  "94577": 600,  // San Leandro
+  "94601": 550,  // Oakland Fruitvale
+  "94602": 700,  // Oakland Glenview
+  "94609": 650,  // Oakland Piedmont Ave
+  "94611": 850,  // Piedmont / Rockridge
+  "94618": 900,  // Rockridge
+  "94705": 950,  // Berkeley Elmwood
+  "94707": 900,  // Berkeley north hills
+  "94708": 850,  // Berkeley hills
+  "94920": 1100, // Belvedere / Tiburon
+  "94941": 900,  // Mill Valley
+  "94945": 750,  // Novato
+  "94965": 1000, // Sausalito
+  "95008": 700,  // Campbell
+  "95014": 850,  // Cupertino
+  "95030": 850,  // Los Gatos
+  "95032": 800,  // Los Gatos east
+  "95120": 900,  // San Jose Almaden
+  "95125": 800,  // San Jose Willow Glen
+  "95126": 750,  // San Jose Rose Garden
+  "95129": 850,  // San Jose west
+  // ── California — Los Angeles ──────────────────────────────────────────────
+  "90024": 1200, // Westwood / Brentwood
+  "90025": 1100, // West LA / Sawtelle
+  "90027": 800,  // Los Feliz
+  "90036": 900,  // Fairfax / Mid-City
+  "90041": 750,  // Eagle Rock
+  "90049": 1300, // Brentwood
+  "90062": 550,  // South LA
+  "90064": 900,  // Rancho Park
+  "90066": 850,  // Mar Vista
+  "90077": 1500, // Bel Air
+  "90094": 900,  // Playa Vista
+  "90210": 2000, // Beverly Hills
+  "90211": 1500, // Beverly Hills adj.
+  "90212": 1400, // Beverly Hills adj.
+  "90254": 1200, // Hermosa Beach
+  "90265": 1500, // Malibu
+  "90272": 1500, // Pacific Palisades
+  "90291": 1100, // Venice
+  "90292": 1000, // Marina del Rey
+  "90401": 1000, // Santa Monica
+  "90403": 1100, // Santa Monica north
+  "90405": 900,  // Santa Monica east
+  "91011": 900,  // La Cañada
+  "91105": 950,  // Pasadena south
+  "91106": 850,  // Pasadena east
+  "91302": 700,  // Calabasas
+  "91361": 750,  // Westlake Village
+  "91436": 1100, // Encino south
+  // ── New York ─────────────────────────────────────────────────────────────
+  "10001": 1300, // Chelsea / Hudson Yards
+  "10003": 1200, // East Village / Greenwich Village
+  "10007": 1400, // Tribeca / Financial
+  "10011": 1200, // Chelsea / West Village
+  "10013": 1400, // Soho / Tribeca
+  "10014": 1300, // West Village
+  "10019": 1400, // Midtown West
+  "10022": 1500, // Midtown East
+  "10023": 1300, // Upper West Side
+  "10024": 1200, // Upper West Side
+  "10025": 1100, // Morningside Heights / UWS
+  "10028": 1200, // Upper East Side
+  "10065": 1400, // Upper East Side
+  "10075": 1300, // Upper East Side
+  "10280": 1200, // Battery Park City
+  "11201": 1100, // Brooklyn Heights / DUMBO
+  "11215": 950,  // Park Slope
+  "11217": 900,  // Boerum Hill / Gowanus
+  "11231": 950,  // Carroll Gardens / Red Hook
+  "11238": 900,  // Prospect Heights
+  // ── Massachusetts — Boston ────────────────────────────────────────────────
+  "02108": 1100, // Beacon Hill
+  "02109": 1000, // North End / Waterfront
+  "02110": 1000, // Financial District
+  "02111": 900,  // Chinatown / Leather District
+  "02116": 1100, // Back Bay
+  "02118": 800,  // South End
+  "02119": 600,  // Roxbury
+  "02127": 800,  // South Boston
+  "02129": 750,  // Charlestown
+  "02130": 700,  // Jamaica Plain
+  "02132": 650,  // West Roxbury
+  "02134": 600,  // Allston
+  "02135": 600,  // Brighton
+  "02138": 900,  // Cambridge Harvard Sq
+  "02139": 850,  // Cambridge Cambridgeport
+  "02140": 800,  // Cambridge north
+  "02141": 700,  // Cambridge east
+  "02142": 750,  // Cambridge MIT
+  "02143": 700,  // Somerville Inman Sq
+  "02144": 650,  // Somerville Teele Sq
+  "02145": 600,  // Somerville east
+  // ── Illinois — Chicago ────────────────────────────────────────────────────
+  "60601": 650,  // Millennium Park / Loop
+  "60602": 650,  // Loop
+  "60610": 700,  // Gold Coast / River North
+  "60611": 750,  // Streeterville / Magnificent Mile
+  "60614": 750,  // Lincoln Park
+  "60615": 500,  // Hyde Park / Woodlawn
+  "60618": 600,  // Roscoe Village / Avondale
+  "60625": 550,  // Ravenswood / Albany Park
+  "60626": 500,  // Rogers Park
+  "60640": 550,  // Uptown
+  "60647": 600,  // Logan Square
+  "60657": 700,  // Lakeview / Wrigleyville
+  // ── Texas — Dallas / Fort Worth ───────────────────────────────────────────
+  "75205": 700,  // Highland Park / UP
+  "75206": 600,  // M Streets / Lower Greenville
+  "75209": 650,  // Bluffview / Devonshire
+  "75219": 600,  // Oak Lawn
+  "75225": 700,  // Preston Hollow south
+  "75229": 650,  // North Dallas / Preston Hollow
+  "75230": 650,  // Preston Hollow / Royal Lane
+  "75240": 550,  // North Dallas Galleria
+  // Texas — Houston
+  "77005": 650,  // West University
+  "77006": 600,  // Montrose
+  "77007": 600,  // The Heights
+  "77019": 700,  // River Oaks
+  "77024": 700,  // Memorial
+  "77025": 550,  // Braeswood / NRG area
+  "77027": 700,  // River Oaks east
+  "77098": 650,  // Upper Kirby / Greenway Plaza
+  // ── Arizona — Phoenix Metro ───────────────────────────────────────────────
+  "85018": 700,  // Arcadia / Biltmore
+  "85028": 600,  // Paradise Valley adj.
+  "85044": 500,  // Ahwatukee
+  "85048": 500,  // Ahwatukee south
+  "85050": 600,  // Desert Ridge
+  "85054": 650,  // DC Ranch adj.
+  "85250": 700,  // Scottsdale south
+  "85251": 650,  // Scottsdale central
+  "85254": 700,  // Scottsdale north
+  "85255": 750,  // North Scottsdale
+  "85259": 700,  // North Scottsdale east
+  "85266": 800,  // Pinnacle Peak
+  // ── Colorado — Denver Metro ───────────────────────────────────────────────
+  "80203": 550,  // Capitol Hill
+  "80205": 500,  // City Park / Whittier
+  "80206": 600,  // Congress Park / Cherry Creek
+  "80209": 650,  // Wash Park / Glendale
+  "80210": 650,  // Platt Park / Observatory Park
+  "80218": 600,  // Cheesman Park / Morey Middle
+  "80220": 550,  // Montclair / Mayfair
+  "80221": 450,  // Regis / Globeville
+  "80246": 600,  // Hilltop / Crestmoor
+  "80302": 650,  // Boulder central
+  "80304": 700,  // Boulder north
+  "80305": 600,  // Boulder south
+  // ── Georgia — Atlanta Metro ───────────────────────────────────────────────
+  "30305": 700,  // Buckhead
+  "30306": 600,  // Virginia-Highland
+  "30307": 550,  // Candler Park / Kirkwood
+  "30308": 500,  // Midtown
+  "30309": 550,  // Ansley Park / Midtown north
+  "30318": 500,  // West Midtown / Blandtown
+  "30327": 700,  // Sandy Springs / Buckhead west
+  "30342": 650,  // Sandy Springs / North Buckhead
+  // ── Oregon — Portland Metro ───────────────────────────────────────────────
+  "97201": 600,  // Downtown / SW Hills
+  "97202": 600,  // Sellwood / Brooklyn
+  "97205": 600,  // Goose Hollow / NW Hills
+  "97209": 650,  // Pearl District
+  "97210": 600,  // Nob Hill / Northwest District
+  "97212": 600,  // Irvington / Alameda
+  "97213": 550,  // Hollywood / Laurelhurst
+  "97214": 600,  // Hawthorne / Sunnyside
+  "97215": 550,  // Mt Tabor
+  "97221": 650,  // West Hills / SW
+  // ── Texas — Austin Metro ──────────────────────────────────────────────────
+  "78701": 700,  // Downtown Austin
+  "78703": 750,  // Tarrytown / Clarksville
+  "78704": 700,  // Travis Heights / South Austin
+  "78705": 650,  // Hyde Park / UT area
+  "78731": 700,  // Northwest Hills
+  "78733": 750,  // Barton Creek / Westlake adj.
+  "78746": 800,  // Westlake Hills / Rob Roy
+  "78750": 600,  // Northwest Austin
+  // ── DC Metro ─────────────────────────────────────────────────────────────
+  "20001": 700,  // DC Shaw / U Street
+  "20002": 650,  // DC Capitol Hill east
+  "20003": 700,  // DC Capitol Hill / Navy Yard
+  "20007": 800,  // Georgetown
+  "20008": 750,  // Woodley Park / Cathedral Heights
+  "20009": 700,  // Adams Morgan / Columbia Heights
+  "20010": 650,  // Columbia Heights north
+  "20016": 800,  // Spring Valley / American U
+  "20015": 750,  // Chevy Chase DC
+  "20817": 750,  // Bethesda / Chevy Chase MD
+  "20814": 700,  // Bethesda
+  "20815": 750,  // Chevy Chase MD
+  "22101": 700,  // McLean VA
+  "22102": 750,  // Tysons / McLean
+  "22201": 650,  // Arlington Clarendon
+  "22202": 600,  // Arlington Crystal City
+  "22207": 700,  // Arlington north
+  // ── Tennessee — Nashville ─────────────────────────────────────────────────
+  "37203": 550,  // The Gulch / Midtown
+  "37205": 600,  // Belle Meade
+  "37206": 500,  // East Nashville
+  "37209": 500,  // Sylvan Park / Charlotte
+  "37212": 550,  // Belmont / Green Hills adj.
+  "37215": 600,  // Green Hills
+  "37220": 600,  // Oak Hill
+  // ── North Carolina — Charlotte ────────────────────────────────────────────
+  "28202": 500,  // Uptown Charlotte
+  "28203": 550,  // Dilworth / South End
+  "28204": 500,  // Elizabeth / Myers Park adj.
+  "28205": 450,  // Plaza Midwood / NoDa
+  "28207": 600,  // Myers Park
+  "28209": 550,  // Sedgefield / Dilworth
+  "28210": 500,  // South Charlotte / Ballantyne north
+  // ── Florida — Miami Metro ─────────────────────────────────────────────────
+  "33101": 600,  // Miami NW
+  "33129": 900,  // Coconut Grove adj.
+  "33131": 1000, // Brickell
+  "33132": 950,  // Edgewater / Wynwood
+  "33133": 900,  // Coconut Grove
+  "33134": 800,  // Coral Gables
+  "33137": 850,  // Upper Eastside / Design District
+  "33139": 1100, // South Beach
+  "33140": 1200, // Mid-Beach
+  "33141": 1000, // Surfside
+  "33154": 1100, // Bal Harbour
+  "33156": 800,  // South Miami / Pinecrest
+  "33158": 850,  // Old Cutler / Palmetto Bay
+  "33480": 1500, // Palm Beach
 };
 
 export function getZipNewConstructionPpsf(
@@ -379,7 +619,7 @@ export function getZipNewConstructionPpsf(
 ): number | null {
   if (!zip) return null;
   const cleaned = zip.toString().trim().slice(0, 5);
-  return WA_ZIP_NEW_CONSTRUCTION_PPSF[cleaned] ?? null;
+  return ZIP_NEW_CONSTRUCTION_PPSF[cleaned] ?? null;
 }
 
 export interface DefaultSellPricePerSqft {
@@ -389,7 +629,7 @@ export interface DefaultSellPricePerSqft {
     | "neighborhood_resale"
     | "neighborhood_all"
     | "zip_premium"
-    | "wa_fallback";
+    | "flat_fallback";
   neighborhoodMedianPpsf?: number;
   compCount?: number;
   multiplier: number;
@@ -450,7 +690,7 @@ export function getDefaultSellPricePerSqft(
         : DEFAULT_SELL_PRICE_PER_SQFT[tier];
     return {
       value: flat,
-      source: "wa_fallback",
+      source: "flat_fallback",
       multiplier:
         strategy === "flip_fix"
           ? TIER_FLIP_PREMIUM[tier]

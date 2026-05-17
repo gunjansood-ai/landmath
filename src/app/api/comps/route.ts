@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sendAlert } from "@/lib/notify";
 
 const APILLOW_KEY = process.env.APILLOW_API_KEY;
 const APILLOW_BASE = "https://api.apillow.co/v1";
@@ -44,7 +45,14 @@ async function submitJob(payload: object, apiKey: string): Promise<string> {
     headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(`APIllow submit error: ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      await sendAlert("🚨 APIllow API key rejected (/api/comps) — HTTP " + res.status + ". Comp endpoint down. Check APILLOW_API_KEY.");
+    } else if (res.status >= 500) {
+      await sendAlert("⚠️ APIllow comps endpoint returned " + res.status + " — service may be down.");
+    }
+    throw new Error(`APIllow submit error: ${res.status}`);
+  }
   const data = await res.json();
   return data.job_id as string;
 }
@@ -158,7 +166,14 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ comps });
   } catch (err) {
-    console.error("APIllow comps fetch failed:", err);
+    const msg = (err as Error).message;
+    console.error("APIllow comps fetch failed:", msg);
+    if (msg.includes("timeout")) {
+      await sendAlert("⚠️ APIllow comps job timed out (>20s) on /api/comps. Comp data unavailable.");
+    } else if (!msg.includes("submit error")) {
+      // submit errors already alerted in submitJob; avoid double-firing
+      await sendAlert("🚨 APIllow comps threw: " + msg);
+    }
     return NextResponse.json({ comps: [] });
   }
 }

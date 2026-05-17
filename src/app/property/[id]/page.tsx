@@ -730,10 +730,14 @@ export default function PropertyAnalysis() {
                 )}
               </div>
 
-              {/* Typology distribution */}
+              {/* Typology distribution — KC only (requires GIS parcel layer) */}
               <div>
                 <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">Structure types nearby</p>
-                {property.neighborhood.typology.total > 0 ? (
+                {property.isKingCounty === false ? (
+                  <p className="text-xs text-gray-400 italic">
+                    Parcel typology chart is only available for King County, WA.
+                  </p>
+                ) : property.neighborhood.typology.total > 0 ? (
                   <>
                     <div className="flex h-3 rounded-full overflow-hidden bg-gray-100 dark:bg-slate-700">
                       {(Object.keys(property.neighborhood.typology.counts) as TypologyBucket[])
@@ -859,6 +863,25 @@ export default function PropertyAnalysis() {
           </div>
         </div>
 
+        {/* Non-KC data coverage banner */}
+        {property.isKingCounty === false && (
+          <div className="mb-6 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 rounded-2xl p-4">
+            <div className="flex items-start gap-3">
+              <Info size={18} className="text-blue-600 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-blue-900 dark:text-blue-200">
+                  Limited data outside King County
+                </p>
+                <p className="text-xs text-blue-800 dark:text-blue-300 mt-1 leading-relaxed">
+                  Deep parcel GIS data (zoning history, assessor roll, typology chart) is only available for King County, WA.
+                  Property details are sourced from Nominatim + APIllow (Zillow data). Comp-based pricing still works,
+                  but verify zoning and lot size with the local assessor before making decisions.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* APIllow key warning — surfaces only when API key is missing or dead */}
         {property.neighborhood?.compDiagnostic?.apiillowStatus === "http_error" &&
           property.neighborhood.compDiagnostic.apiillowHttpStatus === 401 && (
@@ -897,7 +920,7 @@ export default function PropertyAnalysis() {
               ? getDefaultSellPricePerSqft(effectiveProperty, qualityTier, analysis.strategy)
               : {
                   value: 425,
-                  source: "wa_fallback" as const,
+                  source: "flat_fallback" as const,
                   multiplier: 1,
                   neighborhoodMedianPpsf: undefined,
                   compCount: undefined,
@@ -908,11 +931,11 @@ export default function PropertyAnalysis() {
               neighborhood_resale: "existing-home resale comps",
               neighborhood_all: "all nearby comps",
               zip_premium: "ZIP-level $/sqft table",
-              wa_fallback: "WA fallback — no usable comps",
+              flat_fallback: "national flat estimate — no usable comps",
             };
             let sellHint: string;
-            if (sellInfo.source === "wa_fallback") {
-              sellHint = sourceLabel.wa_fallback;
+            if (sellInfo.source === "flat_fallback") {
+              sellHint = sourceLabel.flat_fallback;
             } else if (sellInfo.source === "zip_premium") {
               sellHint = `ZIP ${sellInfo.zip ?? "?"} baseline × ${sellInfo.multiplier.toFixed(2)}× ${qualityTier.replace("_", "-")} — no neighborhood comps available`;
             } else {
@@ -923,7 +946,7 @@ export default function PropertyAnalysis() {
               }`;
             }
             const sellSource: "neighborhood" | "wa_fallback" =
-              sellInfo.source === "wa_fallback" ? "wa_fallback" : "neighborhood";
+              sellInfo.source === "flat_fallback" ? "wa_fallback" : "neighborhood";
 
             return (
               <StrategyCard
@@ -984,8 +1007,8 @@ export default function PropertyAnalysis() {
                   Comparable Sales — Sources
                 </h2>
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                  {property.neighborhood.sales.length} recent sales within 800 m. These are the comps the engine used —
-                  click any address to verify on the King County Assessor.
+                  {property.neighborhood.sales.length} recent sales within 1.5 mi. These are the comps the engine used
+                  {property.isKingCounty !== false && " — click any address to verify on the King County Assessor"}.
                 </p>
               </div>
               <button
@@ -1071,7 +1094,9 @@ export default function PropertyAnalysis() {
                   </tbody>
                 </table>
                 <p className="text-[10px] text-gray-400 mt-3">
-                  Source: King County PropertyInfo / KC Assessor eRealProperty. Sales filtered to PRICE &gt; $100,000.
+                  {property.isKingCounty !== false
+                    ? "Source: King County PropertyInfo / KC Assessor eRealProperty. Sales filtered to PRICE > $100,000."
+                    : "Source: APIllow (Zillow data). Sales filtered to PRICE > $100,000 within 1.5 mi radius."}
                 </p>
               </div>
             )}

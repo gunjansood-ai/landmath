@@ -36,6 +36,9 @@ export interface PropertyData {
   subjectAssessorUrl?: string | null;
   /** Subject parcel viewer URL (KC for now). */
   subjectParcelViewerUrl?: string | null;
+  /** True when the property is inside King County WA (full GIS data available).
+   *  False for all other areas — uses Nominatim + APIllow fallback only. */
+  isKingCounty?: boolean;
 }
 
 export interface FinancingConfig {

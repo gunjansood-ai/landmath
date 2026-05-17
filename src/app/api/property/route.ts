@@ -10,14 +10,17 @@ import {
   type ParcelSample,
   type TypologyBucket,
 } from "@/lib/buildability";
+import { sendAlert } from "@/lib/notify";
 
 /**
  * Aggregated property lookup. Takes lat/lng and returns:
- *   - parcel: subject parcel data (PropertyInfo layer 2)
- *   - sales: top recent sales (PropertyInfo layer 3) — kept for back-compat
- *   - marketEstimate: median of recent sales (kept for back-compat)
+ *   - parcel: subject parcel data
+ *   - sales: top recent sales — kept for back-compat
+ *   - marketEstimate: median of recent sales — kept for back-compat
  *   - assessor: subject's building details (sqft, beds, baths, year)
- *   - neighborhood: NEW — adaptive-radius typology + cited comps (with sqft + drill-in URLs)
+ *   - neighborhood: adaptive-radius typology + cited comps (with sqft + drill-in URLs)
+ *   - isKingCounty: true when full KC GIS data is available; false elsewhere (uses
+ *       Nominatim reverse geocode + APIllow property lookup as fallback)
  */
 
 const KC_PROPERTY_INFO =
@@ -99,7 +102,8 @@ async function pollApiillowJob(
 async function fetchApiillowSoldComps(
   lat: number,
   lng: number,
-  city: string | null
+  city: string | null,
+  state: string = "WA"
 ): Promise<ApiillowFetchResult> {
   if (!APILLOW_KEY || APILLOW_KEY === "your_apillow_api_key_here") {
     return { comps: [], status: "no_key" };
@@ -107,7 +111,7 @@ async function fetchApiillowSoldComps(
 
   // APIllow searches by city or ZIP, not lat/lng radius. We search sold SFRs
   // in the subject city and then filter to 1.5 miles post-fetch.
-  const searchQuery = city ? `${city} WA` : `${lat.toFixed(3)},${lng.toFixed(3)}`;
+  const searchQuery = city ? `${city} ${state}` : `${lat.toFixed(3)},${lng.toFixed(3)}`;
 
   try {
     const res = await fetch(`${APILLOW_BASE}/properties`, {
@@ -122,10 +126,26 @@ async function fetchApiillowSoldComps(
     });
     if (!res.ok) {
       console.error("APIllow comps submit error:", res.status);
+      if (res.status === 401 || res.status === 403) {
+        await sendAlert("🚨 APIllow API key rejected (comps) — HTTP " + res.status + ". Check APILLOW_API_KEY in Vercel env vars.");
+      } else if (res.status >= 500) {
+        await sendAlert("⚠️ APIllow comps endpoint returned " + res.status + " — service may be down. Comp pricing will fall back to ZIP/flat table.");
+      }
       return { comps: [], status: "http_error", httpStatus: res.status };
     }
     const { job_id } = await res.json();
-    const all = await pollApiillowJob(job_id);
+    let all: ApiillowProperty[];
+    try {
+      all = await pollApiillowJob(job_id);
+    } catch (pollErr) {
+      const msg = (pollErr as Error).message;
+      if (msg.includes("timeout")) {
+        await sendAlert("⚠️ APIllow comps job timed out (>20s). Comp data unavailable for this request.");
+      } else {
+        await sendAlert("🚨 APIllow comps poll failed: " + msg);
+      }
+      return { comps: [], status: "exception" };
+    }
 
     // Filter to 1.5-mile radius from subject.
     const nearby = all.filter(
@@ -137,13 +157,109 @@ async function fetchApiillowSoldComps(
 
     return { comps: nearby, status: "ok" };
   } catch (err) {
-    console.error("APIllow fetch failed:", err);
+    const msg = (err as Error).message;
+    console.error("APIllow fetch failed:", msg);
+    await sendAlert("🚨 APIllow comps request threw an exception: " + msg);
     return { comps: [], status: "exception" };
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PropertyInfo helpers
+// Non-KC fallback: Nominatim reverse geocode + APIllow property lookup
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface NominatimAddress {
+  house_number?: string;
+  road?: string;
+  city?: string;
+  town?: string;
+  village?: string;
+  county?: string;
+  state?: string;
+  postcode?: string;
+  country_code?: string;
+}
+
+interface NominatimResult {
+  display_name?: string;
+  address?: NominatimAddress;
+}
+
+async function reverseGeocode(lat: number, lng: number): Promise<NominatimResult | null> {
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&addressdetails=1`,
+      {
+        headers: { "User-Agent": "LandMath/1.0 (landmath.app)" },
+        next: { revalidate: 86400 },
+      }
+    );
+    if (!res.ok) {
+      await sendAlert("⚠️ Nominatim reverse geocode returned HTTP " + res.status + " for [" + lat.toFixed(4) + "," + lng.toFixed(4) + "]. Non-KC address lookup degraded.");
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    await sendAlert("⚠️ Nominatim reverse geocode failed: " + (err as Error).message + ". Non-KC address lookup unavailable.");
+    return null;
+  }
+}
+
+interface ApiillowPropertyDetail {
+  street_address?: string;
+  city?: string;
+  state?: string;
+  zipcode?: string;
+  latitude?: number;
+  longitude?: number;
+  price?: number;
+  last_sold_price?: number;
+  zestimate?: number;
+  living_area?: number;
+  lot_size?: number;
+  bedrooms?: number;
+  bathrooms?: number;
+  year_built?: number;
+  property_type?: string;
+  tax_history?: Array<{ year?: number; tax?: number; value?: number }>;
+  price_history?: Array<{ date?: string; event?: string; price?: number }>;
+}
+
+async function lookupApiillowByAddress(
+  address: string
+): Promise<ApiillowPropertyDetail | null> {
+  if (!APILLOW_KEY || APILLOW_KEY === "your_apillow_api_key_here") return null;
+  try {
+    const res = await fetch(`${APILLOW_BASE}/properties`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": APILLOW_KEY },
+      body: JSON.stringify({ addresses: [address], max_items: 1 }),
+    });
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        await sendAlert("🚨 APIllow API key rejected (address lookup) — HTTP " + res.status + ". Non-KC subject property details unavailable. Check APILLOW_API_KEY.");
+      } else if (res.status >= 500) {
+        await sendAlert("⚠️ APIllow address lookup returned " + res.status + " — service may be down. Non-KC property details unavailable.");
+      }
+      return null;
+    }
+    const { job_id } = await res.json();
+    try {
+      const properties = await pollApiillowJob(job_id);
+      return (properties[0] as ApiillowPropertyDetail) ?? null;
+    } catch (pollErr) {
+      const msg = (pollErr as Error).message;
+      await sendAlert("⚠️ APIllow address lookup poll failed: " + msg + ". Non-KC property details unavailable.");
+      return null;
+    }
+  } catch (err) {
+    await sendAlert("⚠️ APIllow address lookup threw: " + (err as Error).message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PropertyInfo helpers (King County GIS)
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface PropertyInfoFeature {
@@ -167,8 +283,19 @@ async function queryPropertyInfoPoint(
     f: "json",
     ...extraParams,
   });
-  const res = await fetch(`${KC_PROPERTY_INFO}/${layerId}/query?${params}`);
-  if (!res.ok) return [];
+  let res: Response;
+  try {
+    res = await fetch(`${KC_PROPERTY_INFO}/${layerId}/query?${params}`);
+  } catch (err) {
+    await sendAlert("⚠️ KC GIS layer " + layerId + " network error: " + (err as Error).message + ". Property data may be unavailable.");
+    return [];
+  }
+  if (!res.ok) {
+    if (res.status >= 500) {
+      await sendAlert("⚠️ KC GIS layer " + layerId + " returned HTTP " + res.status + ". Property data may be unavailable.");
+    }
+    return [];
+  }
   const data = await res.json();
   return (data.features ?? []).map((f: PropertyInfoFeature) => f.attributes);
 }
@@ -282,62 +409,64 @@ async function buildNeighborhood(
   lat: number,
   lng: number,
   subjectPin: string | null,
-  subjectCity: string | null
+  subjectCity: string | null,
+  isKingCounty: boolean = true,
+  subjectState: string = "WA"
 ): Promise<NeighborhoodData> {
-  // 1. Adaptive radius for typology (parcels)
-  let parcels: RawParcel[] = [];
+  // ── KC-only: parcel typology + raw sales layer ──────────────────────────
+  let parcelSamples: ParcelSample[] = [];
+  let salesRaw: RawSale[] = [];
   let radiusM = ADAPTIVE_RADII_M[ADAPTIVE_RADII_M.length - 1];
-  for (const r of ADAPTIVE_RADII_M) {
-    parcels = (await queryNearbyParcels(lat, lng, r)) as RawParcel[];
-    if (parcels.length >= MIN_PARCELS_FOR_TYPOLOGY) {
+
+  if (isKingCounty) {
+    // 1. Adaptive radius for typology (parcels)
+    let parcels: RawParcel[] = [];
+    for (const r of ADAPTIVE_RADII_M) {
+      parcels = (await queryNearbyParcels(lat, lng, r)) as RawParcel[];
+      if (parcels.length >= MIN_PARCELS_FOR_TYPOLOGY) {
+        radiusM = r;
+        break;
+      }
       radiusM = r;
-      break;
     }
-    radiusM = r;
+
+    const otherParcels = subjectPin
+      ? parcels.filter((p) => p.PIN && p.PIN !== subjectPin)
+      : parcels;
+
+    parcelSamples = otherParcels.map((p): ParcelSample => ({
+      pin: p.PIN,
+      address: p.ADDR_FULL ?? null,
+      presentUse: p.PREUSE_DESC ?? null,
+      typology: bucketParcelByPreuse(p.PREUSE_DESC),
+      lotSizeSqft: typeof p.LOTSQFT === "number" ? p.LOTSQFT : undefined,
+      sourceUrl: KC_ASSESSOR_DETAIL(p.PIN),
+    }));
+
+    // 2. Sales — adaptive radius for KC fallback comp pool.
+    salesRaw = ((await queryNearbySales(lat, lng, 800)) as RawSale[]).filter(
+      (s) => s.PIN && s.SalePrice && (s.SalePrice as number) > 100000
+    );
+    if (salesRaw.length < 15) {
+      const wider = ((await queryNearbySales(lat, lng, 1200)) as RawSale[]).filter(
+        (s) => s.PIN && s.SalePrice && (s.SalePrice as number) > 100000
+      );
+      if (wider.length > salesRaw.length) salesRaw = wider;
+    }
+    if (salesRaw.length < 10) {
+      const widest = ((await queryNearbySales(lat, lng, 1609)) as RawSale[]).filter(
+        (s) => s.PIN && s.SalePrice && (s.SalePrice as number) > 100000
+      );
+      if (widest.length > salesRaw.length) salesRaw = widest;
+    }
   }
-
-  // Exclude the subject parcel from typology counts.
-  const otherParcels = subjectPin
-    ? parcels.filter((p) => p.PIN && p.PIN !== subjectPin)
-    : parcels;
-
-  const parcelSamples: ParcelSample[] = otherParcels.map((p): ParcelSample => ({
-    pin: p.PIN,
-    address: p.ADDR_FULL ?? null,
-    presentUse: p.PREUSE_DESC ?? null,
-    typology: bucketParcelByPreuse(p.PREUSE_DESC),
-    lotSizeSqft: typeof p.LOTSQFT === "number" ? p.LOTSQFT : undefined,
-    sourceUrl: KC_ASSESSOR_DETAIL(p.PIN),
-  }));
 
   const typology = computeTypologyDistribution(parcelSamples);
-
-  // 2. Sales — adaptive radius to ensure enough comp pool for strategy filtering.
-  //    Start 800m; widen to 1200m if <15 raw comps; 1609m (1 mile) if still <10.
-  //    Strategy-aware filtering on the client will narrow this pool further.
-  let salesRaw = ((await queryNearbySales(lat, lng, 800)) as RawSale[]).filter(
-    (s) => s.PIN && s.SalePrice && (s.SalePrice as number) > 100000
-  );
-  if (salesRaw.length < 15) {
-    const wider = ((await queryNearbySales(lat, lng, 1200)) as RawSale[]).filter(
-      (s) => s.PIN && s.SalePrice && (s.SalePrice as number) > 100000
-    );
-    if (wider.length > salesRaw.length) salesRaw = wider;
-  }
-  if (salesRaw.length < 10) {
-    const widest = ((await queryNearbySales(lat, lng, 1609)) as RawSale[]).filter(
-      (s) => s.PIN && s.SalePrice && (s.SalePrice as number) > 100000
-    );
-    if (widest.length > salesRaw.length) salesRaw = widest;
-  }
-
-  // Citation pool: top 20 so strategy filters have enough to bite into;
-  // UI defaults to showing 10 but can drill in.
   const topSales = salesRaw.slice(0, 20);
 
   // 3. APIllow comps — primary source of $/sqft data (has real sqft + yearBuilt).
   //    KC Assessor HTML can't be scraped; KC layer 3 sales lack sqft. APIllow it is.
-  const apiillowResult = await fetchApiillowSoldComps(lat, lng, subjectCity);
+  const apiillowResult = await fetchApiillowSoldComps(lat, lng, subjectCity, subjectState);
   const apiillowComps = apiillowResult.comps;
 
   // Build a KC-address-keyed map so we can enrich APIllow comps with a KC PIN
@@ -508,27 +637,132 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "lat and lng required" }, { status: 400 });
   }
 
-  // Subject parcel + initial sales (back-compat).
+  // ── 1. Try King County GIS first ─────────────────────────────────────────
   const parcelResults = (await queryPropertyInfoPoint(
     2,
     lat,
     lng,
     "PIN,ADDR_FULL,CTYNAME,POSTALCTYNAME,LOTSQFT,APPRLNDVAL,APPR_IMPR,KCA_ZONING,KCA_ACRES,PREUSE_CODE,PREUSE_DESC,PROPTYPE"
   )) as Array<Record<string, unknown>>;
-  const parcel = parcelResults[0] ?? null;
+  const kcParcel = parcelResults[0] ?? null;
+  const isKingCounty = kcParcel !== null;
 
-  const subjectPin = (parcel?.PIN as string) ?? null;
-  const subjectCity =
-    ((parcel?.CTYNAME as string)?.trim() ||
-      (parcel?.POSTALCTYNAME as string)?.trim()) ?? null;
+  // ── 2a. King County path ──────────────────────────────────────────────────
+  if (isKingCounty) {
+    const subjectPin = (kcParcel!.PIN as string) ?? null;
+    const subjectCity =
+      ((kcParcel!.CTYNAME as string)?.trim() ||
+        (kcParcel!.POSTALCTYNAME as string)?.trim()) ?? null;
 
-  // Run assessor lookup + neighborhood assembly in parallel.
-  const [assessor, neighborhood] = await Promise.all([
-    subjectPin ? getAssessorDetails(subjectPin) : Promise.resolve(null),
-    buildNeighborhood(lat, lng, subjectPin, subjectCity),
-  ]);
+    const [assessor, neighborhood] = await Promise.all([
+      subjectPin ? getAssessorDetails(subjectPin) : Promise.resolve(null),
+      buildNeighborhood(lat, lng, subjectPin, subjectCity, true, "WA"),
+    ]);
 
-  // Back-compat: keep `sales` and `marketEstimate` at the top level.
+    const marketEstimate =
+      neighborhood.sales.length > 0
+        ? (() => {
+            const prices = neighborhood.sales
+              .map((s) => s.salePrice)
+              .sort((a, b) => a - b);
+            return prices[Math.floor(prices.length / 2)];
+          })()
+        : null;
+
+    return NextResponse.json({
+      isKingCounty: true,
+      parcel: {
+        pin: kcParcel!.PIN,
+        address: kcParcel!.ADDR_FULL,
+        city: subjectCity,
+        lotSizeSqft:
+          (kcParcel!.LOTSQFT as number) ||
+          Math.round(((kcParcel!.KCA_ACRES as number) || 0) * 43560),
+        appraisedLandValue: (kcParcel!.APPRLNDVAL as number) || 0,
+        appraisedImpValue: (kcParcel!.APPR_IMPR as number) || 0,
+        appraisedTotal:
+          ((kcParcel!.APPRLNDVAL as number) || 0) +
+          ((kcParcel!.APPR_IMPR as number) || 0),
+        zoningCode: (kcParcel!.KCA_ZONING as string)?.trim() || null,
+        presentUseCode: kcParcel!.PREUSE_CODE,
+        presentUse: (kcParcel!.PREUSE_DESC as string)?.trim() || null,
+        propertyType: kcParcel!.PROPTYPE,
+        assessorUrl: subjectPin ? KC_ASSESSOR_DETAIL(subjectPin) : null,
+        parcelViewerUrl: subjectPin ? KC_PARCEL_VIEWER(subjectPin) : null,
+      },
+      sales: neighborhood.sales.slice(0, 5).map((c) => ({
+        address: c.address,
+        salePrice: c.salePrice,
+        saleDate: c.saleDate,
+        principalUse: c.principalUse,
+      })),
+      marketEstimate,
+      assessor,
+      neighborhood,
+    });
+  }
+
+  // ── 2b. Non-KC fallback: Nominatim reverse geocode + APIllow property lookup
+  const geo = await reverseGeocode(lat, lng);
+  const addr = geo?.address ?? {};
+  const subjectCity = addr.city ?? addr.town ?? addr.village ?? null;
+  const subjectState = addr.state ?? null;
+  const postcode = addr.postcode ?? null;
+  const streetAddress =
+    addr.house_number && addr.road
+      ? `${addr.house_number} ${addr.road}`
+      : null;
+  const fullAddress =
+    streetAddress && subjectCity && subjectState
+      ? `${streetAddress}, ${subjectCity}, ${subjectState} ${postcode ?? ""}`.trim()
+      : null;
+
+  // APIllow detail lookup for the subject property itself (sqft, beds, year, etc.)
+  let apiillowDetail: ApiillowPropertyDetail | null = null;
+  if (fullAddress) {
+    apiillowDetail = await lookupApiillowByAddress(fullAddress);
+  }
+
+  // Synthetic parcel — shape matches the KC parcel payload so consumers don't branch
+  const syntheticParcel = {
+    pin: null,
+    address: fullAddress ?? geo?.display_name ?? null,
+    city: subjectCity,
+    state: subjectState,
+    zipCode: postcode,
+    lotSizeSqft: apiillowDetail?.lot_size ?? null,
+    appraisedLandValue: null,
+    appraisedImpValue: null,
+    appraisedTotal: apiillowDetail?.zestimate ?? null,
+    zoningCode: null,
+    presentUseCode: null,
+    presentUse: apiillowDetail?.property_type ?? null,
+    propertyType: apiillowDetail?.property_type ?? null,
+    assessorUrl: null,
+    parcelViewerUrl: null,
+  };
+
+  // Synthetic assessor from APIllow
+  const assessor: AssessorBits | null = apiillowDetail
+    ? {
+        sqftLiving: apiillowDetail.living_area ?? 0,
+        yearBuilt: apiillowDetail.year_built ?? 0,
+        bedrooms: apiillowDetail.bedrooms ?? 0,
+        bathrooms: apiillowDetail.bathrooms ?? 0,
+        stories: 1,
+      }
+    : null;
+
+  // Neighborhood: skip KC GIS, still run APIllow comps
+  const neighborhood = await buildNeighborhood(
+    lat,
+    lng,
+    null,
+    subjectCity,
+    false,
+    subjectState ?? "US"
+  );
+
   const marketEstimate =
     neighborhood.sales.length > 0
       ? (() => {
@@ -540,26 +774,8 @@ export async function GET(req: NextRequest) {
       : null;
 
   return NextResponse.json({
-    parcel: parcel
-      ? {
-          pin: parcel.PIN,
-          address: parcel.ADDR_FULL,
-          city: subjectCity,
-          lotSizeSqft:
-            (parcel.LOTSQFT as number) ||
-            Math.round(((parcel.KCA_ACRES as number) || 0) * 43560),
-          appraisedLandValue: (parcel.APPRLNDVAL as number) || 0,
-          appraisedImpValue: (parcel.APPR_IMPR as number) || 0,
-          appraisedTotal:
-            ((parcel.APPRLNDVAL as number) || 0) + ((parcel.APPR_IMPR as number) || 0),
-          zoningCode: (parcel.KCA_ZONING as string)?.trim() || null,
-          presentUseCode: parcel.PREUSE_CODE,
-          presentUse: (parcel.PREUSE_DESC as string)?.trim() || null,
-          propertyType: parcel.PROPTYPE,
-          assessorUrl: subjectPin ? KC_ASSESSOR_DETAIL(subjectPin) : null,
-          parcelViewerUrl: subjectPin ? KC_PARCEL_VIEWER(subjectPin) : null,
-        }
-      : null,
+    isKingCounty: false,
+    parcel: syntheticParcel,
     sales: neighborhood.sales.slice(0, 5).map((c) => ({
       address: c.address,
       salePrice: c.salePrice,

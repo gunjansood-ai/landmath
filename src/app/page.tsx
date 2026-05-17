@@ -160,6 +160,7 @@ export default function Home() {
         neighborhood: propertyData.neighborhood ?? undefined,
         subjectAssessorUrl: parcel?.assessorUrl ?? null,
         subjectParcelViewerUrl: parcel?.parcelViewerUrl ?? null,
+        isKingCounty: propertyData.isKingCounty ?? false,
       };
 
       setCurrentProperty(property);
