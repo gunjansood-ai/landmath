@@ -63,6 +63,15 @@ export interface TypologyDistribution {
   shares: Record<TypologyBucket, number>;
 }
 
+export interface CompDataDiagnostic {
+  rentCastStatus: "ok" | "no_key" | "http_error" | "exception";
+  rentCastHttpStatus?: number;
+  rentCastReturned: number;
+  compsWithSqft: number;
+  newConstructionComps: number;
+  source: "rentcast" | "kc_only";
+}
+
 export interface NeighborhoodData {
   radiusM: number;             // resolved adaptive radius (400 / 800 / 1609 m)
   parcelCount: number;
@@ -76,6 +85,7 @@ export interface NeighborhoodData {
   medianLotSqft: number | null;
   isSparse: boolean;            // true when even 1.0 mi yields < 20 parcels
   sourceCity: string | null;
+  compDiagnostic?: CompDataDiagnostic;
 }
 
 export type CaveatSeverity = "info" | "warning" | "block";

@@ -676,6 +676,22 @@ export default function PropertyAnalysis() {
                     </span>
                   )}
                 </p>
+                {property.neighborhood.compDiagnostic && (
+                  <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-1 font-mono">
+                    Comps: {property.neighborhood.compDiagnostic.rentCastReturned} returned ·{" "}
+                    {property.neighborhood.compDiagnostic.compsWithSqft} with sqft ·{" "}
+                    {property.neighborhood.compDiagnostic.newConstructionComps} new construction ·{" "}
+                    source: {property.neighborhood.compDiagnostic.source}
+                    {property.neighborhood.compDiagnostic.rentCastStatus !== "ok" && (
+                      <span className="ml-2 text-red-500">
+                        ⚠ RentCast: {property.neighborhood.compDiagnostic.rentCastStatus}
+                        {property.neighborhood.compDiagnostic.rentCastHttpStatus
+                          ? ` (${property.neighborhood.compDiagnostic.rentCastHttpStatus})`
+                          : ""}
+                      </span>
+                    )}
+                  </p>
+                )}
               </div>
               {property.neighborhood.isSparse && (
                 <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 bg-amber-50 dark:bg-amber-900/20 px-2 py-0.5 rounded-full">

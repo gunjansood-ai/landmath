@@ -361,22 +361,26 @@ export function getDefaultSellPricePerSqft(
     };
   }
 
-  // For new-build strategies, filter to NEW CONSTRUCTION comps.
+  // For new-build strategies:
+  //  Tier 1) Have ≥3 NEW-construction comps → use their median DIRECTLY.
+  //           (No tier multiplier — those comps ARE new-construction prices.)
+  //  Tier 2) <3 new comps → use all-comp median × tier multiplier
+  //           (multiplier here estimates the new-construction premium over resale).
+  //  Tier 3) <3 valid comps anywhere → WA flat fallback.
   if (strategy === "fresh_build" || strategy === "split_build") {
     const newComps = nb.sales.filter((s) => s.isNewConstructionAtSale === true);
     const fromNew = medianPpsf(newComps);
-    const mult = TIER_NEW_CONSTRUCTION_MULTIPLIER[tier];
     if (fromNew && fromNew.count >= 3) {
       return {
-        value: Math.round(fromNew.median * mult),
+        value: fromNew.median, // direct — these ARE new-construction sale prices
         source: "neighborhood_new",
         neighborhoodMedianPpsf: fromNew.median,
         compCount: fromNew.count,
-        multiplier: mult,
+        multiplier: 1.0,
         strategy,
       };
     }
-    // Fall back to all comps with the new-construction multiplier.
+    const mult = TIER_NEW_CONSTRUCTION_MULTIPLIER[tier];
     const fromAll = medianPpsf(nb.sales);
     if (fromAll && fromAll.count >= 3) {
       return {
@@ -396,18 +400,18 @@ export function getDefaultSellPricePerSqft(
     };
   }
 
-  // main_adu: prefer SFR+ADU comps, fall back to recent SFRs, then all.
+  // main_adu: prefer SFR+ADU comps, fall back to recent SFRs (new), then all.
+  // When we have new-construction comps, use them directly (no multiplier).
   if (strategy === "main_adu") {
-    const mult = TIER_NEW_CONSTRUCTION_MULTIPLIER[tier];
     const aduComps = nb.sales.filter((s) => s.typology === "sfr_with_adu");
     const fromAdu = medianPpsf(aduComps);
     if (fromAdu && fromAdu.count >= 3) {
       return {
-        value: Math.round(fromAdu.median * mult),
+        value: fromAdu.median,
         source: "neighborhood_new",
         neighborhoodMedianPpsf: fromAdu.median,
         compCount: fromAdu.count,
-        multiplier: mult,
+        multiplier: 1.0,
         strategy,
       };
     }
@@ -417,14 +421,15 @@ export function getDefaultSellPricePerSqft(
     const fromRecentSfr = medianPpsf(recentSfr);
     if (fromRecentSfr && fromRecentSfr.count >= 3) {
       return {
-        value: Math.round(fromRecentSfr.median * mult),
+        value: fromRecentSfr.median, // recent SFR ≈ new construction valuation
         source: "neighborhood_new",
         neighborhoodMedianPpsf: fromRecentSfr.median,
         compCount: fromRecentSfr.count,
-        multiplier: mult,
+        multiplier: 1.0,
         strategy,
       };
     }
+    const mult = TIER_NEW_CONSTRUCTION_MULTIPLIER[tier];
     const fromAll = medianPpsf(nb.sales);
     if (fromAll && fromAll.count >= 3) {
       return {

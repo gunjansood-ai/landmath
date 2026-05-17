@@ -53,22 +53,28 @@ interface RentCastListing {
   longitude?: number;
 }
 
+interface RentCastFetchResult {
+  comps: RentCastListing[];
+  status: "ok" | "no_key" | "http_error" | "exception";
+  httpStatus?: number;
+}
+
 async function fetchRentCastSoldComps(
   lat: number,
   lng: number
-): Promise<RentCastListing[]> {
+): Promise<RentCastFetchResult> {
   if (!RENTCAST_KEY || RENTCAST_KEY === "your_rentcast_api_key_here") {
-    return [];
+    return { comps: [], status: "no_key" };
   }
-  // Pull SOLD listings within 1 mile, last 24 months. RentCast returns the
-  // sqft and yearBuilt we need for strategy-aware comp filtering.
+  // Pull SOLD listings within 1.5 miles, last 24 months. Bigger radius +
+  // higher limit gives us enough new-construction comps to filter to.
   const params = new URLSearchParams({
     latitude: lat.toString(),
     longitude: lng.toString(),
-    radius: "1",
+    radius: "1.5",
     propertyType: "Single Family",
     status: "Sold",
-    limit: "30",
+    limit: "50",
     daysOld: "730",
   });
   try {
@@ -81,13 +87,13 @@ async function fetchRentCastSoldComps(
     );
     if (!res.ok) {
       console.error("RentCast comps error:", res.status);
-      return [];
+      return { comps: [], status: "http_error", httpStatus: res.status };
     }
     const data = await res.json();
-    return Array.isArray(data) ? data : [];
+    return { comps: Array.isArray(data) ? data : [], status: "ok" };
   } catch (err) {
     console.error("RentCast fetch failed:", err);
-    return [];
+    return { comps: [], status: "exception" };
   }
 }
 
@@ -284,92 +290,34 @@ async function buildNeighborhood(
   // UI defaults to showing 10 but can drill in.
   const topSales = salesRaw.slice(0, 20);
 
-  // 3. Comp enrichment via RentCast (has real sqft + yearBuilt).
-  //    The KC Assessor scrape we used to do here returns 0 for every field
-  //    because the HTML is AJAX-loaded — see comment near fetchRentCastSoldComps.
-  const rentCastComps = await fetchRentCastSoldComps(lat, lng);
+  // 3. RentCast comps — primary source of $/sqft data (has real sqft + yearBuilt).
+  //    KC Assessor HTML can't be scraped; KC layer 3 sales lack sqft. RentCast it is.
+  const rentCastResult = await fetchRentCastSoldComps(lat, lng);
+  const rentCastComps = rentCastResult.comps;
 
-  // Build address→RentCast map for matching against KC sales.
-  // Normalize addresses for matching (strip case, punctuation, USPS abbrevs).
+  // Build a KC-address-keyed map so we can enrich RentCast comps with a KC PIN
+  // for drill-in (best effort — many won't match, that's OK).
   const normalizeAddr = (s: string): string =>
     s.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
-  const rcByAddr = new Map<string, RentCastListing>();
-  for (const r of rentCastComps) {
-    if (r.formattedAddress) {
-      // Index by full normalized address plus by just the street part (everything before the city).
-      const full = normalizeAddr(r.formattedAddress);
-      rcByAddr.set(full, r);
-      const streetOnly = normalizeAddr(r.formattedAddress.split(",")[0] ?? "");
-      if (streetOnly) rcByAddr.set(streetOnly, r);
+  const kcByStreet = new Map<string, RawSale>();
+  for (const s of salesRaw) {
+    if (s.address) {
+      // KC address may be "10728 NE 26TH ST" or "10728 NE 26TH ST BELLEVUE WA".
+      // Extract just the leading number + street tokens up to first city-ish word.
+      const streetMatch = s.address.match(/^(\d+[^A-Z]*(?:[A-Z]+\s*)+?(?:ST|AVE|DR|RD|PL|CT|LN|WAY|BLVD|PKWY|LOOP|TER)\b)/i);
+      const street = streetMatch ? streetMatch[1].trim() : s.address.split(/\s{2,}|,/)[0];
+      kcByStreet.set(normalizeAddr(street), s);
     }
   }
 
-  const matchRentCast = (kcAddress: string): RentCastListing | undefined => {
-    if (!kcAddress) return undefined;
-    const full = normalizeAddr(kcAddress);
-    const direct = rcByAddr.get(full);
-    if (direct) return direct;
-    // Try the first comma-split chunk (KC address may include city/state)
-    const streetOnly = normalizeAddr(kcAddress.split(",")[0] ?? "");
-    return rcByAddr.get(streetOnly);
+  const findKcMatch = (rcAddress: string): RawSale | undefined => {
+    const streetOnly = rcAddress.split(",")[0]?.trim() ?? "";
+    return kcByStreet.get(normalizeAddr(streetOnly));
   };
 
-  const buildComp = (
-    pin: string,
-    address: string,
-    salePrice: number,
-    saleDate: string,
-    principalUse: string,
-    rc?: RentCastListing
-  ): Comp => {
-    const sqft = rc?.squareFootage && rc.squareFootage > 200 ? rc.squareFootage : undefined;
-    const yearBuilt = rc?.yearBuilt && rc.yearBuilt > 1800 ? rc.yearBuilt : undefined;
-    const saleTs = Date.parse(saleDate);
-    const saleYear = !isNaN(saleTs)
-      ? new Date(saleTs).getFullYear()
-      : new Date().getFullYear();
-    const isNewConstructionAtSale =
-      yearBuilt !== undefined && yearBuilt >= saleYear - 5;
-    return {
-      pin,
-      address,
-      salePrice,
-      saleDate,
-      principalUse,
-      typology: bucketParcelByPreuse(principalUse),
-      sqftLiving: sqft,
-      yearBuilt,
-      isNewConstructionAtSale,
-      pricePerSqft: sqft && salePrice ? Math.round(salePrice / sqft) : undefined,
-      sourceUrl: pin ? KC_ASSESSOR_DETAIL(pin) : "",
-      parcelViewerUrl: pin ? KC_PARCEL_VIEWER(pin) : undefined,
-    };
-  };
-
-  // Strategy A: enrich KC sales with RentCast matches (preserve KC drill-in URLs).
-  const enrichedFromKc: Comp[] = topSales.map((s) => {
-    const rc = matchRentCast(s.address ?? "");
-    const salePrice = Number(s.SalePrice ?? 0);
-    const saleDate =
-      typeof s.SaleDate === "number"
-        ? new Date(s.SaleDate).toISOString().slice(0, 10)
-        : String(s.SaleDate ?? "");
-    return buildComp(s.PIN, s.address ?? "Unknown", salePrice, saleDate, s.Principal_Use ?? "", rc);
-  });
-
-  // Strategy B: if KC matching didn't yield enough enriched comps, supplement
-  // with RentCast-only comps that didn't match any KC sale (no PIN, no drill-in).
-  const matchedAddrs = new Set(
-    enrichedFromKc
-      .filter((c) => c.sqftLiving !== undefined)
-      .map((c) => normalizeAddr(c.address))
-  );
-  const unmatchedRc: Comp[] = rentCastComps
-    .filter((r) => {
-      if (!r.formattedAddress || !r.price) return false;
-      return !matchedAddrs.has(normalizeAddr(r.formattedAddress));
-    })
-    .slice(0, 10)
+  // Build the cited-comp set FROM RentCast (every comp has sqft + yearBuilt).
+  const rentCastSales: Comp[] = rentCastComps
+    .filter((r) => r.formattedAddress && r.price && r.price > 100000)
     .map((r): Comp => {
       const sqft = r.squareFootage && r.squareFootage > 200 ? r.squareFootage : undefined;
       const yearBuilt = r.yearBuilt && r.yearBuilt > 1800 ? r.yearBuilt : undefined;
@@ -378,8 +326,15 @@ async function buildNeighborhood(
       const saleYear = !isNaN(saleTs)
         ? new Date(saleTs).getFullYear()
         : new Date().getFullYear();
+      // Widened from 5 to 10 years. A 2016 build sold in 2024 is still a
+      // valid "new construction" comp for valuation purposes — the home
+      // presents as modern and prices accordingly.
+      const isNewConstructionAtSale =
+        yearBuilt !== undefined && yearBuilt >= saleYear - 10;
+      // Best-effort KC enrichment for drill-in URL.
+      const kc = findKcMatch(r.formattedAddress ?? "");
       return {
-        pin: "",
+        pin: kc?.PIN ?? "",
         address: r.formattedAddress ?? "Unknown",
         salePrice: r.price ?? 0,
         saleDate: saleDate ? saleDate.slice(0, 10) : "",
@@ -387,24 +342,55 @@ async function buildNeighborhood(
         typology: "sfr",
         sqftLiving: sqft,
         yearBuilt,
-        isNewConstructionAtSale:
-          yearBuilt !== undefined && yearBuilt >= saleYear - 5,
-        pricePerSqft:
-          sqft && r.price ? Math.round(r.price / sqft) : undefined,
-        sourceUrl: `https://www.redfin.com/?q=${encodeURIComponent(r.formattedAddress ?? "")}`,
-        parcelViewerUrl: undefined,
+        isNewConstructionAtSale,
+        pricePerSqft: sqft && r.price ? Math.round(r.price / sqft) : undefined,
+        sourceUrl: kc?.PIN
+          ? KC_ASSESSOR_DETAIL(kc.PIN)
+          : `https://www.redfin.com/?q=${encodeURIComponent(r.formattedAddress ?? "")}`,
+        parcelViewerUrl: kc?.PIN ? KC_PARCEL_VIEWER(kc.PIN) : undefined,
       };
     });
 
-  // Combine: prefer enriched KC sales first (have drill-in URLs), then top up
-  // with RentCast-only comps to ensure ≥10 comps with sqft data when possible.
-  const enrichedKcWithSqft = enrichedFromKc.filter((c) => c.sqftLiving !== undefined);
-  const enrichedKcWithoutSqft = enrichedFromKc.filter((c) => c.sqftLiving === undefined);
-  const sales: Comp[] = [
-    ...enrichedKcWithSqft,
-    ...unmatchedRc,
-    ...enrichedKcWithoutSqft,
-  ].slice(0, 15);
+  // KC fallback comps — used only when RentCast returned nothing. No sqft data
+  // means these won't contribute to ppsf median, but they're cited for visibility.
+  const kcFallbackSales: Comp[] = topSales.map((s): Comp => {
+    const salePrice = Number(s.SalePrice ?? 0);
+    return {
+      pin: s.PIN,
+      address: s.address ?? "Unknown",
+      salePrice,
+      saleDate:
+        typeof s.SaleDate === "number"
+          ? new Date(s.SaleDate).toISOString().slice(0, 10)
+          : String(s.SaleDate ?? ""),
+      principalUse: s.Principal_Use ?? "",
+      typology: bucketParcelByPreuse(s.Principal_Use),
+      sqftLiving: undefined,
+      yearBuilt: undefined,
+      isNewConstructionAtSale: false,
+      pricePerSqft: undefined,
+      sourceUrl: KC_ASSESSOR_DETAIL(s.PIN),
+      parcelViewerUrl: KC_PARCEL_VIEWER(s.PIN),
+    };
+  });
+
+  // RentCast primary; KC fallback only if RentCast is empty.
+  const sales: Comp[] =
+    rentCastSales.length > 0
+      ? rentCastSales.slice(0, 15)
+      : kcFallbackSales.slice(0, 10);
+
+  // ── Diagnostics for the UI ──────────────────────────────────────────────
+  const compsWithSqft = sales.filter((c) => c.sqftLiving !== undefined).length;
+  const newConstructionComps = sales.filter((c) => c.isNewConstructionAtSale).length;
+  const diagnostic = {
+    rentCastStatus: rentCastResult.status,
+    rentCastHttpStatus: rentCastResult.httpStatus,
+    rentCastReturned: rentCastComps.length,
+    compsWithSqft,
+    newConstructionComps,
+    source: (rentCastSales.length > 0 ? "rentcast" : "kc_only") as "rentcast" | "kc_only",
+  };
 
   // 4. Trend signal: recent non-SFR sales in last 24 months.
   const trendCutoff = monthsAgo(TREND_LOOKBACK_MONTHS);
@@ -453,6 +439,7 @@ async function buildNeighborhood(
     medianLotSqft,
     isSparse: parcelSamples.length < MIN_PARCELS_FOR_TYPOLOGY,
     sourceCity: subjectCity,
+    compDiagnostic: diagnostic,
   };
 }
 
