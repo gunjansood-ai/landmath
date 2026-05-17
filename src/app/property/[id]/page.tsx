@@ -29,6 +29,7 @@ import DealNarrator from "@/components/DealNarrator";
 import PermitRadar from "@/components/PermitRadar";
 import LenderReport from "@/components/LenderReport";
 import DownloadReportButton from "@/components/DownloadReportButton";
+import FeasibilityReasoningModal from "@/components/FeasibilityReasoningModal";
 import {
   useStore,
   Strategy,
@@ -79,28 +80,7 @@ const STRATEGY_ORDER: Strategy[] = [
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const feasibilityBadge = (f: string) => {
-  switch (f) {
-    case "permitted":
-      return (
-        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-green-700 bg-green-50 dark:bg-green-900/30 dark:text-green-400 px-2 py-0.5 rounded-full">
-          <CheckCircle2 size={10} /> Permitted
-        </span>
-      );
-    case "conditional":
-      return (
-        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400 px-2 py-0.5 rounded-full">
-          <AlertTriangle size={10} /> Conditional
-        </span>
-      );
-    default:
-      return (
-        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400 px-2 py-0.5 rounded-full">
-          <Ban size={10} /> Not Allowed
-        </span>
-      );
-  }
-};
+// feasibilityBadge replaced by FeasibilityReasoningModal component
 
 function confidenceChip(score?: number, label?: string) {
   if (typeof score !== "number") return null;
@@ -326,7 +306,7 @@ function ExistingStrategyDetail({
             </div>
           </div>
           <div className="flex flex-col items-end gap-1">
-            {feasibilityBadge(analysis.feasibility)}
+            <FeasibilityReasoningModal analysis={analysis} />
             {confidenceChip(analysis.confidence, analysis.confidenceLabel)}
           </div>
         </div>
@@ -502,7 +482,7 @@ function TownhomeDetail({
             </div>
           </div>
           <div className="flex flex-col items-end gap-1">
-            {feasibilityBadge(analysis.feasibility)}
+            <FeasibilityReasoningModal analysis={analysis} />
           </div>
         </div>
 
@@ -621,7 +601,7 @@ function MultiFamilyDetail({
             </div>
           </div>
           <div className="flex flex-col items-end gap-1">
-            {feasibilityBadge(analysis.feasibility)}
+            <FeasibilityReasoningModal analysis={analysis} />
           </div>
         </div>
 

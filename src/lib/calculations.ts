@@ -92,19 +92,20 @@ export const STRATEGIES: Record<
 
 /**
  * Estimate the district minimum lot size from a zoning code string.
- * Stopgap until the full zoning KB (Vercel Blob) is wired up.
- *
  * Handles common WA patterns:
  *   - SF-5000, SF-7200 → numeric is the min lot in sqft
  *   - R-5, R-7.2, RS-5 → numeric is units-per-acre OR min lot in 1000s of sqft
  *   - R-1, R-2, R-3 → dwelling-units-per-acre (smaller number = larger lot)
- *   - R-4 (Bellevue) → ~10,800 sqft (4 units/acre)
  *   - NR-1 / RA-2.5 / RA-5 (King County rural) → 1, 2.5, 5 acres respectively
+ *   - LR1/LR2/LR3, MR, HR → Seattle low-rise / mid-rise / high-rise (no min lot)
  *   - Returns null when the code is unrecognized.
  */
 export function estimateDistrictMinLotSqft(zoningCode: string | null | undefined): number | null {
   if (!zoningCode || /^unknown$/i.test(zoningCode)) return null;
-  const upper = zoningCode.toUpperCase();
+  const upper = zoningCode.trim().toUpperCase();
+
+  // Seattle Low-Rise / Mid-Rise / High-Rise — no minimum lot size (density zones)
+  if (/^(LR[123]|MR|HR|NC[123]|C[12]|IB|IC|IG[12]?)[^0-9]?/.test(upper)) return null;
 
   // Rural-area pattern: RA-X means X-acre minimum
   const ra = upper.match(/^RA[- ]?(\d+(?:\.\d+)?)/);
@@ -114,11 +115,18 @@ export function estimateDistrictMinLotSqft(zoningCode: string | null | undefined
   const nr = upper.match(/^NR[- ]?(\d+(?:\.\d+)?)/);
   if (nr) return Math.round(parseFloat(nr[1]) * 43560);
 
-  // SF-NNNN, RS-NNNN — number is sqft
-  const sfNumeric = upper.match(/(?:SF|RS|R)[- ]?(\d{3,5})(?:[^\d]|$)/);
+  // SF-NNNN, RS-NNNN — number is explicit sqft minimum
+  const sfNumeric = upper.match(/(?:SF|RS)[- ]?(\d{3,5})(?:[^\d]|$)/);
   if (sfNumeric) {
     const n = parseInt(sfNumeric[1], 10);
-    if (n >= 1000) return n; // explicit sqft
+    if (n >= 1000) return n;
+  }
+
+  // R-NNNN — number ≥ 1000 treated as explicit sqft
+  const rSqft = upper.match(/^R[- ]?(\d{4,5})(?:[^\d]|$)/);
+  if (rSqft) {
+    const n = parseInt(rSqft[1], 10);
+    if (n >= 1000 && n <= 200000) return n;
   }
 
   // R-N with N as units-per-acre (Bellevue, Seattle low-density)
@@ -126,7 +134,6 @@ export function estimateDistrictMinLotSqft(zoningCode: string | null | undefined
   if (rUnits) {
     const units = parseFloat(rUnits[1]);
     if (units > 0 && units <= 30) {
-      // 43,560 sqft/acre ÷ units = min lot per unit
       return Math.round(43560 / units);
     }
   }
@@ -139,6 +146,414 @@ export function estimateDistrictMinLotSqft(zoningCode: string | null | undefined
   }
 
   return null;
+}
+
+// ─── Zoning classification helpers ──────────────────────────────────────────
+
+type ZoningClass =
+  | "sf"           // single-family (SF-5000, R-1, RS-9600 …)
+  | "lr"           // Seattle low-rise (LR1/LR2/LR3) — allows townhomes + small MF
+  | "mr_hr"        // Seattle mid/high-rise — allows large MF
+  | "commercial"   // NC/C/IB zones — mixed use
+  | "rural"        // RA/NR zones
+  | "unknown";
+
+export function classifyZoning(zoningCode: string | null | undefined): ZoningClass {
+  if (!zoningCode || /^unknown$/i.test(zoningCode)) return "unknown";
+  const upper = zoningCode.trim().toUpperCase();
+  if (/^(HR|MR)([^0-9]|$)/.test(upper)) return "mr_hr";
+  if (/^LR[123]([^0-9]|$)/.test(upper)) return "lr";
+  if (/^(NC[123]|C[12]|IB|IC|IG[12]?)([^0-9]|$)/.test(upper)) return "commercial";
+  if (/^(RA|NR)[- ]?\d/.test(upper)) return "rural";
+  // SF, RS, R-NNNN, R-N (small number = SF density)
+  if (/^(SF|RS)[- ]?\d/.test(upper)) return "sf";
+  if (/^R[- ]?\d/.test(upper)) return "sf"; // R-1 through R-9, R-5000, etc.
+  return "unknown";
+}
+
+// ─── Official zoning lookup URLs ─────────────────────────────────────────────
+
+export interface ZoningLookupLink {
+  label: string;
+  url: string;
+}
+
+/**
+ * Returns up to two official links the user can click to verify zoning for
+ * the subject property. Coordinates are used for map-based portals.
+ */
+export function getZoningLookupLinks(
+  property: Pick<PropertyData, "city" | "state" | "county" | "zip" | "lat" | "lng" | "zoningCode" | "subjectAssessorUrl" | "subjectParcelViewerUrl">
+): ZoningLookupLink[] {
+  const city = (property.city ?? "").toLowerCase();
+  const state = (property.state ?? "").toUpperCase();
+  const lat = property.lat;
+  const lng = property.lng;
+  const links: ZoningLookupLink[] = [];
+
+  if (state === "WA") {
+    if (city.includes("seattle")) {
+      if (lat && lng) {
+        links.push({
+          label: "Seattle Zoning Map (SDCI)",
+          url: `https://maps.seattle.gov/SDCI/?lat=${lat}&lng=${lng}`,
+        });
+      } else {
+        links.push({
+          label: "Seattle Zoning Map (SDCI)",
+          url: "https://maps.seattle.gov/SDCI/",
+        });
+      }
+      links.push({
+        label: "Seattle ADU Resources (SDCI)",
+        url: "https://www.seattle.gov/sdci/permits/common-projects/accessory-dwelling-units",
+      });
+    } else if (city.includes("bellevue")) {
+      links.push({
+        label: "Bellevue Zoning Map",
+        url: "https://gisapps.bellevuewa.gov/Portal/apps/storymaps/map-viewer/index.html#webmap=a2a5b5acbb8e48d98e8f1d9a2c93c929",
+      });
+      links.push({
+        label: "Bellevue Land Use & Zoning",
+        url: "https://bellevuewa.gov/city-government/departments/community-development/land-use",
+      });
+    } else if (city.includes("kirkland")) {
+      links.push({
+        label: "Kirkland Zoning Map",
+        url: "https://www.kirklandwa.gov/government/departments/planning-building/planning-zoning",
+      });
+    } else if (city.includes("redmond")) {
+      links.push({
+        label: "Redmond Permits & Zoning",
+        url: "https://www.redmond.gov/428/Permits-and-Zoning",
+      });
+    } else {
+      // Generic KC
+      if (lat && lng) {
+        links.push({
+          label: "King County GIS Parcel Viewer",
+          url: `https://blue.kingcounty.gov/Assessor/eRealProperty/default.aspx`,
+        });
+      }
+      links.push({
+        label: "King County DPER Permits",
+        url: "https://www.kingcounty.gov/depts/local-services/permits.aspx",
+      });
+    }
+  } else {
+    // Generic fallback: Google the city's zoning map
+    const cityLabel = property.city ? `${property.city}, ${state}` : state;
+    links.push({
+      label: `${cityLabel} Zoning Map`,
+      url: `https://www.google.com/search?q=${encodeURIComponent(`${cityLabel} zoning map official`)}`,
+    });
+    links.push({
+      label: `${cityLabel} Building Permits`,
+      url: `https://www.google.com/search?q=${encodeURIComponent(`${cityLabel} building permit lookup`)}`,
+    });
+  }
+
+  // If we have a direct assessor URL from GIS, always append it
+  if (property.subjectAssessorUrl) {
+    links.push({
+      label: "Assessor Property Record",
+      url: property.subjectAssessorUrl,
+    });
+  }
+  if (property.subjectParcelViewerUrl) {
+    links.push({
+      label: "Parcel Viewer Map",
+      url: property.subjectParcelViewerUrl,
+    });
+  }
+
+  return links;
+}
+
+// ─── Feasibility reasoning ────────────────────────────────────────────────────
+
+export interface FeasibilityReasoning {
+  verdict: "permitted" | "conditional" | "not_allowed";
+  summary: string;
+  logic: string[];        // step-by-step bullets explaining the decision
+  assumptions: string[];  // explicit assumptions / limitations
+  gaps: string[];         // what we couldn't verify
+  links: ZoningLookupLink[];
+}
+
+/**
+ * Returns a plain-English breakdown of why we scored a strategy as
+ * permitted / conditional / not_allowed for this property.
+ */
+export function getFeasibilityReasoning(
+  property: PropertyData,
+  strategy: Strategy,
+  feasibility: "permitted" | "conditional" | "not_allowed"
+): FeasibilityReasoning {
+  const zoningClass = classifyZoning(property.zoningCode);
+  const districtMin = estimateDistrictMinLotSqft(property.zoningCode);
+  const lot = property.lotSizeSqft;
+  const links = getZoningLookupLinks(property);
+  const zCode = property.zoningCode || "Unknown";
+
+  switch (strategy) {
+    case "fresh_build": {
+      return {
+        verdict: feasibility,
+        summary: "Demolish and rebuild — almost always zoning-permitted on residential lots.",
+        logic: [
+          `Your lot is zoned "${zCode}". A tear-down rebuild doesn't change density or lot layout, so zoning approval is generally straightforward.`,
+          "The main gating factor is a building permit, not a rezone or subdivision approval.",
+          "We marked this 'Permitted' because no new lots, additional units, or density increase is required.",
+        ],
+        assumptions: [
+          "The existing structure has no landmark or historic designation requiring review.",
+          "There are no deed restrictions, HOA rules, or easements blocking demolition.",
+          "No critical areas (steep slopes, wetlands, floodplain) require special setback treatment.",
+        ],
+        gaps: [
+          "We didn't check whether the lot is in a historic district — call the city if the home is pre-1940.",
+          "We didn't verify specific setback, FAR, or height limits for your zone — confirm with a designer before drawing plans.",
+        ],
+        links,
+      };
+    }
+
+    case "split_build": {
+      if (feasibility === "not_allowed") {
+        const reason = !districtMin
+          ? `We couldn't parse a minimum lot size from zoning code "${zCode}", and the lot (${lot.toLocaleString()} sqft) is below our 15,000 sqft conservative threshold for an unrecognized code.`
+          : `Your lot (${lot.toLocaleString()} sqft) is smaller than the 2× district minimum required for a split: ${(districtMin * 2).toLocaleString()} sqft.`;
+        return {
+          verdict: "not_allowed",
+          summary: "Lot too small to split under estimated zoning rules.",
+          logic: [reason],
+          assumptions: [
+            `District minimum lot size ${districtMin ? `estimated at ${districtMin.toLocaleString()} sqft from code "${zCode}"` : "could not be determined"}.`,
+            "Two resulting parcels must each meet or exceed the district minimum after the split.",
+          ],
+          gaps: [
+            "Zoning code parsing is an estimate. Confirm the actual minimum lot size with city planning.",
+            "Critical areas, deed restrictions, or frontage requirements may impose additional constraints.",
+          ],
+          links,
+        };
+      }
+      const required = districtMin ? districtMin * 2 : null;
+      const margin = required ? Math.round(((lot - required) / required) * 100) : null;
+      return {
+        verdict: feasibility,
+        summary: feasibility === "permitted"
+          ? "Lot size likely supports a two-lot split — verify with city."
+          : "Lot is borderline for a split — formal city review required.",
+        logic: [
+          districtMin
+            ? `Zoning code "${zCode}" → estimated district minimum lot: ${districtMin.toLocaleString()} sqft.`
+            : `Zoning code "${zCode}" not recognized — using 15,000 sqft conservative threshold.`,
+          `Your lot: ${lot.toLocaleString()} sqft. Two new lots must each meet the minimum, so the lot needs to be at least ${required?.toLocaleString() ?? "2×"} the district min.`,
+          margin != null
+            ? `Your lot is ${margin > 0 ? "+" : ""}${margin}% vs. the required minimum — ${feasibility === "permitted" ? "clears the bar with a safety margin" : "just barely meets it, leaving little room for setbacks or access easements"}.`
+            : `At this size a split is plausible under most WA single-family zoning.`,
+          "We add a 10% buffer on top of the bare minimum to account for setbacks, access easements, and frontage requirements that eat into usable area.",
+        ],
+        assumptions: [
+          "Short plats (2-lot splits) are the assumed process — subdivisions into 3+ lots take longer.",
+          "Both resulting lots must have independent street access (panhandle or frontage).",
+          "No critical areas (wetlands, steep slopes) overlap the subdivision line.",
+          "Assumption: city allows two detached structures in this zone.",
+        ],
+        gaps: [
+          "We estimated the district minimum from the zoning code string — the city may use a different value.",
+          "We didn't check frontage width, which can block a split even when lot area is sufficient.",
+          "Short-plat approval involves discretionary review; the lot-size math is necessary but not sufficient.",
+          "Tree retention, utility easements, and access width rules vary by city.",
+        ],
+        links,
+      };
+    }
+
+    case "main_adu": {
+      if (feasibility === "not_allowed") {
+        return {
+          verdict: "not_allowed",
+          summary: "Lot is too small for an ADU under our minimum threshold.",
+          logic: [
+            `Your lot is ${lot.toLocaleString()} sqft. We use 4,000 sqft as the floor below which ADU construction becomes physically impractical regardless of zoning.`,
+            "Washington HB 1337 (2023) mandates ADU rights across urban lots, but very small lots still face practical constraints.",
+          ],
+          assumptions: [
+            "Physical ADU construction on lots below 4,000 sqft is rare due to setback requirements.",
+          ],
+          gaps: [
+            "Your city may have looser rules — confirm with the local permitting office.",
+          ],
+          links,
+        };
+      }
+      return {
+        verdict: feasibility,
+        summary: "ADUs are broadly allowed on WA residential lots by state law.",
+        logic: [
+          "Washington HB 1337 (signed April 2023) requires all cities in Urban Growth Areas to permit at least one Accessory Dwelling Unit on any lot that can accommodate a single-family home.",
+          "The law allows up to 2 ADUs per lot (one attached/JADU + one detached/DADU).",
+          `Your lot is ${lot.toLocaleString()} sqft — ${lot >= 5000 ? "comfortably above" : "near"} the 5,000 sqft threshold we use as the practical minimum for a detached ADU with required setbacks.`,
+          lot >= 5000
+            ? "We marked this 'Permitted' — state law removes the need for a rezone or special exception."
+            : "We marked this 'Conditional' because the small lot size may make it physically difficult to meet setback requirements for a detached ADU.",
+        ],
+        assumptions: [
+          "The property is in a Washington State Urban Growth Area.",
+          "The existing home qualifies as a primary residence (ADUs aren't allowed on vacant lots).",
+          "Owner-occupancy rules, if any, have been checked — HB 1337 eliminated most but some cities had grandfathered rules.",
+        ],
+        gaps: [
+          "City-specific ADU design standards (setbacks, height, FAR, max size) still apply — we haven't verified those.",
+          "HOA rules may restrict or prohibit ADUs even when city zoning allows them.",
+          "Short-term rental restrictions may affect ADU revenue potential.",
+          "HB 1337 doesn't override critical area setbacks (wetlands, steep slopes).",
+        ],
+        links,
+      };
+    }
+
+    case "flip_fix": {
+      return {
+        verdict: "permitted",
+        summary: "Renovation work never requires a rezone — always zoning-permitted.",
+        logic: [
+          "A fix-and-flip renovates the existing structure. No new lots, units, or density change is involved.",
+          "This means no zoning approval is needed — only a building permit for the scope of work.",
+          `The existing use (residential, zoned "${zCode}") is preserved.`,
+        ],
+        assumptions: [
+          "The renovation stays within the existing footprint (no major additions).",
+          "The home is not in a historic preservation district requiring design review.",
+          "Work is cosmetic + systems (kitchen, baths, electrical, plumbing) — not structural changes that require engineering review.",
+        ],
+        gaps: [
+          "If you plan to add square footage, zoning setbacks and FAR limits apply — that would be an 'Addition' permit, not just renovation.",
+          "Unpermitted work in the existing structure may surface during permit inspection.",
+        ],
+        links,
+      };
+    }
+
+    case "townhome": {
+      if (feasibility === "not_allowed") {
+        const isLrOrHigher = ["lr", "mr_hr", "commercial"].includes(zoningClass);
+        return {
+          verdict: "not_allowed",
+          summary: "Townhome/row-house development doesn't appear permitted in this zone.",
+          logic: [
+            `Zoning code "${zCode}" → classified as "${zoningClass}".`,
+            isLrOrHigher
+              ? "This is a density zone that typically allows townhomes, but our pattern match didn't find a confirmed match."
+              : "Townhomes require at least Low-Rise (LR1) or equivalent attached-housing zoning. Single-family zones typically prohibit them.",
+            `Lot size ${lot.toLocaleString()} sqft is also below our 8,000 sqft minimum for townhome feasibility.`,
+          ],
+          assumptions: [
+            "Townhome/row-house = attached housing requiring at least LR1 or RM zoning in most WA cities.",
+          ],
+          gaps: [
+            "Some cities allow cottage housing clusters on SF lots — your city may have this provision.",
+            "A formal pre-application conference with the city is the only reliable way to confirm.",
+          ],
+          links,
+        };
+      }
+      return {
+        verdict: feasibility,
+        summary: feasibility === "permitted"
+          ? "Zoning code suggests attached housing is allowed here."
+          : "Townhomes may be possible but require formal city confirmation.",
+        logic: [
+          `Zoning code "${zCode}" → classified as "${zoningClass}".`,
+          zoningClass === "lr"
+            ? "Seattle LR1/LR2/LR3 zones explicitly permit townhomes and rowhouses up to defined height limits."
+            : zoningClass === "mr_hr" || zoningClass === "commercial"
+            ? "Mid-rise, high-rise, and commercial zones typically allow townhomes as a lower-intensity use."
+            : "Our pattern match found attached-housing zoning indicators in the code, but couldn't confirm the exact subzone rules.",
+          `Lot size ${lot.toLocaleString()} sqft ${lot >= 8000 ? "is adequate" : "is tight"} for a townhome project (typical minimum ~6,000 sqft).`,
+        ],
+        assumptions: [
+          "Townhome = attached fee-simple units (not condos).",
+          "Unit count and density are assumed to be within the zone's maximum.",
+          "Adequate street frontage and access for each unit is assumed.",
+        ],
+        gaps: [
+          "We haven't verified the specific unit count or height limit for your subzone.",
+          "Seattle LR zones have detailed design standards (setbacks, landscaping, facade) — a pre-application meeting is recommended.",
+          "Form-based code requirements (modulation, materials) vary.",
+        ],
+        links,
+      };
+    }
+
+    case "multifamily": {
+      if (feasibility === "not_allowed") {
+        return {
+          verdict: "not_allowed",
+          summary: "Multi-family development doesn't appear permitted in this zone.",
+          logic: [
+            `Zoning code "${zCode}" → classified as "${zoningClass}".`,
+            zoningClass === "sf"
+              ? "Single-family zones prohibit multi-family (3+ unit) buildings. You'd need an upzone or a SEPA rezone process."
+              : zoningClass === "lr"
+              ? "Seattle LR zones allow townhomes and small multi-family (LR2+ typically allows 6+ units), but the specific subzone limits may cap unit count."
+              : `Code "${zCode}" doesn't match mid-rise (MR), high-rise (HR), or RM patterns required for standard multi-family.`,
+            lot < 12000
+              ? `Lot size (${lot.toLocaleString()} sqft) is also below our 12,000 sqft minimum for a practical multi-family project.`
+              : "",
+          ].filter(Boolean),
+          assumptions: [
+            "Multi-family = 4+ unit building (not duplex/triplex, which may have separate allowances).",
+          ],
+          gaps: [
+            "WA HB 1110 (2023) requires many cities to allow middle housing (duplexes, fourplexes) on SF lots. If your city has implemented this, triplex/fourplex may now be legal even in an SF zone.",
+            "Confirm with city planning — a pre-application conference will clarify what's allowed.",
+          ],
+          links,
+        };
+      }
+      return {
+        verdict: feasibility,
+        summary: feasibility === "permitted"
+          ? "Zoning code supports multi-family development."
+          : "Multi-family may be possible but formal review is required.",
+        logic: [
+          `Zoning code "${zCode}" → classified as "${zoningClass}".`,
+          zoningClass === "mr_hr"
+            ? "Seattle MR (Mid-Rise) and HR (High-Rise) zones explicitly allow multi-family residential buildings."
+            : zoningClass === "lr"
+            ? "Seattle LR2/LR3 zones allow multi-unit residential. LR1 is limited to smaller buildings."
+            : zoningClass === "commercial"
+            ? "Commercial/mixed-use zones typically allow residential uses above ground floor."
+            : "The zoning code contains patterns associated with higher-density residential, but we couldn't confirm the exact limits.",
+          `Lot size ${lot.toLocaleString()} sqft ${lot >= 12000 ? "is workable" : "is on the smaller side"} for a multi-family project.`,
+        ],
+        assumptions: [
+          "Zoning allows the number of units in the analysis (we haven't verified the FAR cap for this specific subzone).",
+          "The lot has adequate setbacks, parking access, and utility capacity for the proposed density.",
+        ],
+        gaps: [
+          "Unit count maximums, height limits, and FAR in your specific subzone need to be confirmed.",
+          "WA SEPA environmental review may be triggered for larger projects (typically 20+ units).",
+          "Parking minimums vary — some Seattle zones have eliminated them, others haven't.",
+        ],
+        links,
+      };
+    }
+
+    default:
+      return {
+        verdict: feasibility,
+        summary: "No specific zoning analysis available for this strategy.",
+        logic: [],
+        assumptions: [],
+        gaps: [],
+        links,
+      };
+  }
 }
 
 // Zoning feasibility check.
