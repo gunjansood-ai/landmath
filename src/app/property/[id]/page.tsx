@@ -803,7 +803,6 @@ function AskPriceChip({
   function startEdit() {
     setRaw(String(Math.round(displayPrice / 1000)));
     setEditing(true);
-    setTimeout(() => inputRef.current?.select(), 0);
   }
 
   function commit() {
@@ -839,6 +838,7 @@ function AskPriceChip({
           <input
             ref={inputRef}
             type="number"
+            autoFocus
             value={raw}
             onChange={(e) => setRaw(e.target.value)}
             onBlur={commit}
