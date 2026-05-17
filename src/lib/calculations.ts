@@ -308,13 +308,93 @@ const DEFAULT_FLIP_PRICE_PER_SQFT: Record<QualityTier, number> = {
   ultra_luxury: 950,
 };
 
+// ─── ZIP-level new-construction $/sqft overrides ─────────────────────────────
+// When the comp pipeline is unavailable (RentCast down, no KC sqft data),
+// we still want SOMETHING smarter than a flat WA average for known luxury
+// ZIPs. These represent typical NEW-CONSTRUCTION sale prices (premium tier
+// baseline) by ZIP. Tier multiplier is applied on top for luxury/ultra.
+//
+// Numbers from 2025–2026 Redfin / Zillow per-sqft data for new builds in
+// each ZIP. Conservative midpoints — actual luxury builds can exceed by
+// 30–50%. Better than nothing, worse than real comps.
+const WA_ZIP_NEW_CONSTRUCTION_PPSF: Record<string, number> = {
+  // Bellevue / Eastside premium
+  "98004": 1100, // Bridle Trails / Yarrow Bay / Vuecrest
+  "98005": 700,  // Crossroads / Lake Hills
+  "98006": 700,  // Newport / Factoria
+  "98007": 650,
+  "98008": 650,  // Lake Hills / Crossroads
+  // Medina / Clyde Hill / Hunts Point — ultra
+  "98039": 1500,
+  // Mercer Island
+  "98040": 1000,
+  // Kirkland
+  "98033": 850,
+  "98034": 700,
+  // Redmond
+  "98052": 700,
+  "98053": 750,
+  // Sammamish
+  "98074": 700,
+  "98075": 700,
+  // Issaquah
+  "98027": 650,
+  "98029": 700,
+  // Seattle premium
+  "98109": 850, // Queen Anne / South Lake Union
+  "98112": 950, // Madison Park / Madrona / Capitol Hill
+  "98119": 850, // Queen Anne North
+  "98199": 850, // Magnolia
+  "98115": 700, // View Ridge / Wedgwood
+  "98117": 700, // Ballard / Loyal Heights
+  "98103": 700, // Greenwood / Fremont / Wallingford
+  "98105": 800, // Laurelhurst / University District
+  "98144": 700, // Mt Baker / Beacon Hill
+  // Seattle mid
+  "98107": 650,
+  "98108": 600,
+  "98116": 700, // West Seattle premium
+  "98136": 650, // West Seattle
+  "98122": 700, // Capitol Hill / Central District
+  "98102": 800, // Eastlake / Capitol Hill
+  "98106": 550,
+  "98118": 600,
+  "98125": 600,
+  "98126": 600,
+  "98133": 550,
+  // Tacoma area
+  "98402": 400, // Downtown Tacoma
+  "98403": 500, // Stadium / Old Town
+  "98405": 400,
+  "98406": 500, // West End
+  "98407": 600, // North Tacoma
+  "98422": 500, // NE Tacoma
+  // Spokane
+  "99203": 350, // South Hill premium
+  "99201": 350, // Downtown
+};
+
+export function getZipNewConstructionPpsf(
+  zip: string | undefined | null
+): number | null {
+  if (!zip) return null;
+  const cleaned = zip.toString().trim().slice(0, 5);
+  return WA_ZIP_NEW_CONSTRUCTION_PPSF[cleaned] ?? null;
+}
+
 export interface DefaultSellPricePerSqft {
   value: number;
-  source: "neighborhood_new" | "neighborhood_resale" | "neighborhood_all" | "wa_fallback";
+  source:
+    | "neighborhood_new"
+    | "neighborhood_resale"
+    | "neighborhood_all"
+    | "zip_premium"
+    | "wa_fallback";
   neighborhoodMedianPpsf?: number;
   compCount?: number;
   multiplier: number;
   strategy: Strategy;
+  zip?: string;
 }
 
 /**
@@ -345,13 +425,31 @@ export function getDefaultSellPricePerSqft(
     return { median: sorted[Math.floor(sorted.length / 2)], count: valid.length };
   };
 
-  if (!nb || nb.sales.length === 0) {
-    const fallback =
+  // Lazy helper: build the fallback (ZIP-aware, then WA-wide flat) for any branch.
+  const fallback = (): DefaultSellPricePerSqft => {
+    const zipPremiumBase = getZipNewConstructionPpsf(property.zip);
+    if (zipPremiumBase !== null) {
+      // ZIP table is calibrated to "premium tier new construction" baseline.
+      // Scale to the user's tier using a relative multiplier vs premium.
+      const tierMult = TIER_NEW_CONSTRUCTION_MULTIPLIER[tier];
+      const premiumMult = TIER_NEW_CONSTRUCTION_MULTIPLIER.premium;
+      const relativeTierMult = tierMult / premiumMult;
+      // For flip_fix, apply renovation discount (~80% of new-build sale price).
+      const flipDiscount = strategy === "flip_fix" ? 0.80 : 1.0;
+      return {
+        value: Math.round(zipPremiumBase * relativeTierMult * flipDiscount),
+        source: "zip_premium",
+        multiplier: relativeTierMult * flipDiscount,
+        strategy,
+        zip: property.zip,
+      };
+    }
+    const flat =
       strategy === "flip_fix"
         ? DEFAULT_FLIP_PRICE_PER_SQFT[tier]
         : DEFAULT_SELL_PRICE_PER_SQFT[tier];
     return {
-      value: fallback,
+      value: flat,
       source: "wa_fallback",
       multiplier:
         strategy === "flip_fix"
@@ -359,6 +457,10 @@ export function getDefaultSellPricePerSqft(
           : TIER_NEW_CONSTRUCTION_MULTIPLIER[tier],
       strategy,
     };
+  };
+
+  if (!nb || nb.sales.length === 0) {
+    return fallback();
   }
 
   // For new-build strategies:
@@ -392,12 +494,7 @@ export function getDefaultSellPricePerSqft(
         strategy,
       };
     }
-    return {
-      value: DEFAULT_SELL_PRICE_PER_SQFT[tier],
-      source: "wa_fallback",
-      multiplier: mult,
-      strategy,
-    };
+    return fallback();
   }
 
   // main_adu: prefer SFR+ADU comps, fall back to recent SFRs (new), then all.
@@ -441,12 +538,7 @@ export function getDefaultSellPricePerSqft(
         strategy,
       };
     }
-    return {
-      value: DEFAULT_SELL_PRICE_PER_SQFT[tier],
-      source: "wa_fallback",
-      multiplier: mult,
-      strategy,
-    };
+    return fallback();
   }
 
   // flip_fix: comp pool = ALL existing-home resale (SFRs, both new and old).
@@ -481,21 +573,11 @@ export function getDefaultSellPricePerSqft(
         strategy,
       };
     }
-    return {
-      value: DEFAULT_FLIP_PRICE_PER_SQFT[tier],
-      source: "wa_fallback",
-      multiplier: mult,
-      strategy,
-    };
+    return fallback();
   }
 
   // Default (pass etc): fall back to standard new construction default.
-  return {
-    value: DEFAULT_SELL_PRICE_PER_SQFT[tier],
-    source: "wa_fallback",
-    multiplier: TIER_NEW_CONSTRUCTION_MULTIPLIER[tier],
-    strategy,
-  };
+  return fallback();
 }
 
 // ─── Strategy-specific construction cost ────────────────────────────────────

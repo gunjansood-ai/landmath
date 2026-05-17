@@ -859,6 +859,35 @@ export default function PropertyAnalysis() {
           </div>
         </div>
 
+        {/* RentCast subscription warning — surfaces only when API key is dead */}
+        {property.neighborhood?.compDiagnostic?.rentCastStatus === "http_error" &&
+          property.neighborhood.compDiagnostic.rentCastHttpStatus === 401 && (
+            <div className="mb-6 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/40 rounded-2xl p-4">
+              <div className="flex items-start gap-3">
+                <AlertOctagon size={18} className="text-red-600 flex-shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="text-sm font-semibold text-red-900 dark:text-red-200">
+                    RentCast API subscription inactive — comp data unavailable
+                  </p>
+                  <p className="text-xs text-red-800 dark:text-red-300 mt-1 leading-relaxed">
+                    Sale $/sqft is falling back to ZIP-level baseline (or WA flat default if your ZIP isn&apos;t in the table).
+                    These are reasonable estimates but not as accurate as live neighborhood comps.
+                    To restore comp-based pricing, renew your subscription at{" "}
+                    <a
+                      href="https://app.rentcast.io/app/api"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline font-medium hover:text-red-900"
+                    >
+                      app.rentcast.io/app/api
+                    </a>
+                    {" "}and update <code className="px-1 py-0.5 bg-red-100 dark:bg-red-900/40 rounded">RENTCAST_API_KEY</code> on Vercel.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
         {/* Strategy Cards — all four in fixed enum order, all editable.
             Top-2 by current score get visual emphasis; "Best Option" badge on rank-1. */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
@@ -878,12 +907,21 @@ export default function PropertyAnalysis() {
               neighborhood_new: "new-construction comps",
               neighborhood_resale: "existing-home resale comps",
               neighborhood_all: "all nearby comps",
+              zip_premium: "ZIP-level $/sqft table",
               wa_fallback: "WA fallback — no usable comps",
             };
-            const sellHint =
-              sellInfo.source === "wa_fallback"
-                ? sourceLabel[sellInfo.source]
-                : `${sellInfo.compCount} ${sourceLabel[sellInfo.source]} @ $${sellInfo.neighborhoodMedianPpsf}/sqft median × ${sellInfo.multiplier.toFixed(2)}× ${qualityTier.replace("_", "-")}`;
+            let sellHint: string;
+            if (sellInfo.source === "wa_fallback") {
+              sellHint = sourceLabel.wa_fallback;
+            } else if (sellInfo.source === "zip_premium") {
+              sellHint = `ZIP ${sellInfo.zip ?? "?"} baseline × ${sellInfo.multiplier.toFixed(2)}× ${qualityTier.replace("_", "-")} — no neighborhood comps available`;
+            } else {
+              sellHint = `${sellInfo.compCount} ${sourceLabel[sellInfo.source]} @ $${sellInfo.neighborhoodMedianPpsf}/sqft median${
+                sellInfo.multiplier !== 1.0
+                  ? ` × ${sellInfo.multiplier.toFixed(2)}× ${qualityTier.replace("_", "-")}`
+                  : " (used directly — these ARE new-build comp prices)"
+              }`;
+            }
             const sellSource: "neighborhood" | "wa_fallback" =
               sellInfo.source === "wa_fallback" ? "wa_fallback" : "neighborhood";
 
