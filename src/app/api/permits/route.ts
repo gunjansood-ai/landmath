@@ -1,23 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
 
 /**
- * Permit Radar — queries KC GIS building permit layers for activity
- * near a subject property. Returns recent new-construction and
- * renovation permits within a 1-mile radius.
+ * Permit Radar — queries Seattle Open Data (Socrata) for building permit
+ * activity near a subject property. Returns recent permits within a
+ * configurable radius, categorised by type.
  *
- * KC Open Data permit endpoints:
- *   - Residential Building Permits (King County unincorporated + cities)
- *   - Uses KingCo_PropertyInfo layer 4 (permit activity)
+ * Data source:
+ *   Seattle Building Permits — data.seattle.gov dataset 76t5-zqzr
+ *   Socrata SoQL spatial query: within_circle(location1, lat, lng, radiusMeters)
  *
- * Falls back gracefully if the layer is unavailable.
+ * Coverage: Seattle city limits only. Returns source="unavailable" for
+ * coordinates outside Seattle's bounding box.
  */
 
-// KC GIS – PropertyInfo service layers
-const KC_PROPERTY_INFO = "https://gismaps.kingcounty.gov/arcgis/rest/services/Property/KingCo_PropertyInfo/MapServer";
+// Seattle Open Data — Building Permits (Socrata)
+const SEATTLE_PERMITS_URL = "https://data.seattle.gov/resource/76t5-zqzr.json";
 
-// KC Open Data Portal – residential permits
-const KC_PERMITS_URL =
-  "https://gisdata.kingcounty.gov/arcgis/rest/services/OpenDataPortal/permits__residential_permits/MapServer/0/query";
+// Approximate Seattle bounding box — coords outside this → unavailable
+const SEATTLE_BOUNDS = {
+  latMin: 47.48,
+  latMax: 47.74,
+  lngMin: -122.46,
+  lngMax: -122.22,
+};
+
+function isInSeattle(lat: number, lng: number): boolean {
+  return (
+    lat >= SEATTLE_BOUNDS.latMin &&
+    lat <= SEATTLE_BOUNDS.latMax &&
+    lng >= SEATTLE_BOUNDS.lngMin &&
+    lng <= SEATTLE_BOUNDS.lngMax
+  );
+}
 
 export interface PermitRecord {
   permitNumber: string;
@@ -43,12 +57,12 @@ export interface PermitRadarResult {
     renovations: number;
     demolitions: number;
     recentActivity: "high" | "medium" | "low";
-    competitiveSupplyScore: number; // 0–100, higher = more competing supply
+    competitiveSupplyScore: number;
     competitiveSupplyLabel: "Low" | "Medium" | "High";
     radiusMiles: number;
     lookbackDays: number;
   };
-  source: "kc_gis" | "unavailable";
+  source: "seattle_open_data" | "unavailable";
   error?: string;
 }
 
@@ -64,35 +78,73 @@ function haversineMiles(lat1: number, lng1: number, lat2: number, lng2: number):
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function categorizePermit(type: string, desc: string): PermitRecord["category"] {
-  const t = (type ?? "").toLowerCase();
+function categorizePermit(
+  permitTypeMapped: string,
+  permitTypeDesc: string,
+  desc: string
+): PermitRecord["category"] {
+  const t = (permitTypeMapped ?? "").toLowerCase();
+  const td = (permitTypeDesc ?? "").toLowerCase();
   const d = (desc ?? "").toLowerCase();
-  const combined = `${t} ${d}`;
+  const combined = `${t} ${td} ${d}`;
 
-  if (combined.includes("demo") || combined.includes("demolit")) return "demo";
-  if (combined.includes("adu") || combined.includes("accessory dwelling") || combined.includes("accessory unit")) return "adu";
-  if (combined.includes("new") && (combined.includes("single family") || combined.includes("sfr") || combined.includes("residence") || combined.includes("dwelling"))) return "new_construction";
-  if (combined.includes("addition") || combined.includes("expand") || combined.includes("square footage")) return "addition";
-  if (combined.includes("remodel") || combined.includes("renovate") || combined.includes("repair") || combined.includes("replace")) return "renovation";
-  if (combined.includes("new construct") || combined.includes("new home") || combined.includes("build")) return "new_construction";
+  if (t === "demolition" || combined.includes("demolit") || combined.includes("demo")) return "demo";
+  if (combined.includes("adu") || combined.includes("accessory dwelling") || combined.includes("backyard cottage") || combined.includes("dadu")) return "adu";
+  if (
+    combined.includes("new single family") ||
+    combined.includes("new residence") ||
+    combined.includes("new home") ||
+    combined.includes("construct new") ||
+    (combined.includes("new") && combined.includes("single family"))
+  ) return "new_construction";
+  if (combined.includes("addition") || combined.includes("expand") || combined.includes("add to")) return "addition";
+  if (
+    combined.includes("remodel") ||
+    combined.includes("renovate") ||
+    combined.includes("alteration") ||
+    combined.includes("repair") ||
+    combined.includes("tenant improvement") ||
+    combined.includes("interior")
+  ) return "renovation";
 
   return "other";
 }
 
 function computeCompetitiveScore(permits: PermitRecord[], lookbackDays: number): number {
-  // Weight: new construction & ADU are direct supply competitors
   const newConst = permits.filter((p) => p.category === "new_construction").length;
   const adu = permits.filter((p) => p.category === "adu").length;
   const additions = permits.filter((p) => p.category === "addition").length;
 
-  // Per 90-day equivalent rate (normalize to 90-day window)
   const daysFactor = 90 / lookbackDays;
   const weightedCount = (newConst * 3 + adu * 2 + additions * 1) * daysFactor;
 
-  // Score: 0 = no competition, 100 = heavy competition
-  // Calibrated: >10 new construction permits in 90 days = 100 (very high)
-  const score = Math.min(100, Math.round((weightedCount / 10) * 100));
-  return score;
+  return Math.min(100, Math.round((weightedCount / 10) * 100));
+}
+
+function emptyResult(
+  radiusMiles: number,
+  lookbackDays: number,
+  source: PermitRadarResult["source"],
+  error?: string
+): PermitRadarResult {
+  return {
+    permits: [],
+    summary: {
+      total: 0,
+      newConstruction: 0,
+      adu: 0,
+      additions: 0,
+      renovations: 0,
+      demolitions: 0,
+      recentActivity: "low",
+      competitiveSupplyScore: 0,
+      competitiveSupplyLabel: "Low",
+      radiusMiles,
+      lookbackDays,
+    },
+    source,
+    error,
+  };
 }
 
 export async function GET(req: NextRequest) {
@@ -105,113 +157,73 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "lat and lng required" }, { status: 400 });
   }
 
-  // Convert radius to meters for ArcGIS
-  const radiusM = Math.round(radiusMiles * 1609.34);
+  // Only Seattle is supported — return unavailable for other areas
+  if (!isInSeattle(lat, lng)) {
+    return NextResponse.json(emptyResult(radiusMiles, lookbackDays, "unavailable"));
+  }
 
-  // Lookback date in MS
-  const cutoffMs = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
-  const cutoffDate = new Date(cutoffMs).toISOString().slice(0, 10);
+  const radiusMeters = Math.round(radiusMiles * 1609.34);
+  const cutoffDate = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
 
   try {
-    // ── Try KC Open Data Portal permits layer ─────────────────────────────
+    // Socrata SoQL query — spatial circle + date filter
+    const where = `within_circle(location1,${lat},${lng},${radiusMeters}) AND issueddate > '${cutoffDate}'`;
     const params = new URLSearchParams({
-      geometry: `${lng},${lat}`,
-      geometryType: "esriGeometryPoint",
-      inSR: "4326",
-      spatialRel: "esriSpatialRelIntersects",
-      distance: radiusM.toString(),
-      units: "esriSRUnit_Meter",
-      outFields: "*",
-      returnGeometry: "true",
-      outSR: "4326",
-      f: "json",
-      resultRecordCount: "200",
-      orderByFields: "IssuedDate DESC",
+      $where: where,
+      $order: "issueddate DESC",
+      $limit: "200",
     });
 
-    let permits: PermitRecord[] = [];
-    let source: PermitRadarResult["source"] = "unavailable";
-
-    const res = await fetch(`${KC_PERMITS_URL}?${params}`, {
-      next: { revalidate: 3600 }, // cache 1 hr
+    const res = await fetch(`${SEATTLE_PERMITS_URL}?${params}`, {
+      headers: { Accept: "application/json" },
+      next: { revalidate: 3600 },
     });
 
-    if (res.ok) {
-      const data = await res.json();
-      const features = data.features ?? [];
-
-      permits = features
-        .filter((f: Record<string, unknown>) => {
-          const attrs = f.attributes as Record<string, unknown>;
-          // Filter to within lookback window
-          const issuedTs = attrs.IssuedDate ? Number(attrs.IssuedDate) : null;
-          if (issuedTs && issuedTs < cutoffMs) return false;
-          return true;
-        })
-        .map((f: Record<string, unknown>): PermitRecord => {
-          const attrs = f.attributes as Record<string, unknown>;
-          const geo = f.geometry as { x?: number; y?: number } | null;
-          const pLat = geo?.y ?? null;
-          const pLng = geo?.x ?? null;
-          const issuedTs = attrs.IssuedDate ? new Date(Number(attrs.IssuedDate)).toISOString().slice(0, 10) : null;
-          const permitType = String(attrs.PermitType ?? attrs.PermitCategory ?? "");
-          const desc = String(attrs.Description ?? attrs.WorkDescription ?? "");
-          const dist =
-            pLat && pLng ? haversineMiles(lat, lng, pLat, pLng) : null;
-
-          return {
-            permitNumber: String(attrs.PermitNumber ?? attrs.ApplNum ?? ""),
-            address: String(attrs.Address ?? attrs.SitusAddress ?? ""),
-            permitType,
-            description: desc,
-            issuedDate: issuedTs,
-            status: String(attrs.StatusCurrent ?? attrs.Status ?? ""),
-            estimatedValue: typeof attrs.EstimatedValue === "number" ? attrs.EstimatedValue : null,
-            latitude: pLat,
-            longitude: pLng,
-            distanceMiles: dist ? Math.round(dist * 100) / 100 : null,
-            category: categorizePermit(permitType, desc),
-          };
-        })
-        .filter((p: PermitRecord) =>
-          p.category === "new_construction" ||
-          p.category === "adu" ||
-          p.category === "addition" ||
-          p.category === "demo" ||
-          p.category === "renovation"
-        )
-        .sort((a: PermitRecord, b: PermitRecord) => (a.distanceMiles ?? 99) - (b.distanceMiles ?? 99));
-
-      source = "kc_gis";
+    if (!res.ok) {
+      console.error(`Seattle permits API error: ${res.status}`);
+      return NextResponse.json(emptyResult(radiusMiles, lookbackDays, "unavailable", `API ${res.status}`));
     }
 
-    // ── Fallback: try PropertyInfo layer for permit-like activity ─────────
-    if (permits.length === 0 && source === "unavailable") {
-      // Try layer 4 of PropertyInfo if it exists (permit records)
-      const fallbackParams = new URLSearchParams({
-        geometry: `${lng},${lat}`,
-        geometryType: "esriGeometryPoint",
-        inSR: "4326",
-        spatialRel: "esriSpatialRelIntersects",
-        distance: radiusM.toString(),
-        units: "esriSRUnit_Meter",
-        outFields: "PIN,ADDR_FULL,PREUSE_DESC,LOTSQFT",
-        returnGeometry: "false",
-        f: "json",
-        where: "PROPTYPE = 'R'",
-        resultRecordCount: "50",
-      });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows: any[] = await res.json();
 
-      const fallbackRes = await fetch(
-        `${KC_PROPERTY_INFO}/2/query?${fallbackParams}`
-      );
-      if (fallbackRes.ok) {
-        // We have parcel data — no real permit data, report graceful unavailability
-        source = "unavailable";
-      }
-    }
+    const permits: PermitRecord[] = rows
+      .map((r): PermitRecord => {
+        const pLat = r.latitude ? parseFloat(r.latitude) : null;
+        const pLng = r.longitude ? parseFloat(r.longitude) : null;
+        const dist = pLat && pLng ? haversineMiles(lat, lng, pLat, pLng) : null;
+        const category = categorizePermit(
+          r.permittypemapped ?? "",
+          r.permittypedesc ?? "",
+          r.description ?? ""
+        );
 
-    // ── Build summary ─────────────────────────────────────────────────────
+        return {
+          permitNumber: r.permitnum ?? "",
+          address: [r.originaladdress1, r.originalcity].filter(Boolean).join(", "),
+          permitType: r.permittypemapped ?? "",
+          description: r.description ?? "",
+          issuedDate: r.issueddate ? r.issueddate.slice(0, 10) : null,
+          status: r.statuscurrent ?? "",
+          estimatedValue: r.estprojectcost ? parseFloat(r.estprojectcost) : null,
+          latitude: pLat,
+          longitude: pLng,
+          distanceMiles: dist != null ? Math.round(dist * 100) / 100 : null,
+          category,
+        };
+      })
+      // Only surface supply-relevant permit types
+      .filter((p) =>
+        p.category === "new_construction" ||
+        p.category === "adu" ||
+        p.category === "addition" ||
+        p.category === "demo" ||
+        p.category === "renovation"
+      )
+      .sort((a, b) => (a.distanceMiles ?? 99) - (b.distanceMiles ?? 99));
+
     const newConstruction = permits.filter((p) => p.category === "new_construction").length;
     const adu = permits.filter((p) => p.category === "adu").length;
     const additions = permits.filter((p) => p.category === "addition").length;
@@ -222,12 +234,11 @@ export async function GET(req: NextRequest) {
     const competitiveSupplyScore = computeCompetitiveScore(permits, lookbackDays);
     const competitiveSupplyLabel: PermitRadarResult["summary"]["competitiveSupplyLabel"] =
       competitiveSupplyScore >= 60 ? "High" : competitiveSupplyScore >= 30 ? "Medium" : "Low";
-
     const recentActivity: PermitRadarResult["summary"]["recentActivity"] =
       total >= 10 ? "high" : total >= 4 ? "medium" : "low";
 
-    const result: PermitRadarResult = {
-      permits: permits.slice(0, 50), // cap payload
+    return NextResponse.json({
+      permits: permits.slice(0, 50),
       summary: {
         total,
         newConstruction,
@@ -241,32 +252,11 @@ export async function GET(req: NextRequest) {
         radiusMiles,
         lookbackDays,
       },
-      source,
-    };
-
-    return NextResponse.json(result);
+      source: "seattle_open_data",
+    } satisfies PermitRadarResult);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
     console.error("Permit radar error:", msg);
-
-    // Return a graceful empty response — never hard-fail the property page
-    return NextResponse.json({
-      permits: [],
-      summary: {
-        total: 0,
-        newConstruction: 0,
-        adu: 0,
-        additions: 0,
-        renovations: 0,
-        demolitions: 0,
-        recentActivity: "low",
-        competitiveSupplyScore: 0,
-        competitiveSupplyLabel: "Low",
-        radiusMiles,
-        lookbackDays,
-      },
-      source: "unavailable",
-      error: msg,
-    } satisfies PermitRadarResult);
+    return NextResponse.json(emptyResult(radiusMiles, lookbackDays, "unavailable", msg));
   }
 }

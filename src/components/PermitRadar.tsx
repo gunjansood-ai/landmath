@@ -287,7 +287,7 @@ export default function PermitRadar({ lat, lng, address }: PermitRadarProps) {
                     Permit data unavailable for this area
                   </p>
                   <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">
-                    Permit Radar currently supports King County, WA. Support for additional counties is coming soon.
+                    Permit Radar currently supports Seattle, WA. Support for additional cities is coming soon.
                   </p>
                 </div>
               </div>
