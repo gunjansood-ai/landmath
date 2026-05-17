@@ -28,6 +28,69 @@ const KC_ASSESSOR_DETAIL = (pin: string) =>
 const KC_PARCEL_VIEWER = (pin: string) =>
   `https://gismaps.kingcounty.gov/parcelviewer2/?pin=${pin}`;
 
+const RENTCAST_KEY = process.env.RENTCAST_API_KEY;
+
+// ─── RentCast comps (real sqft + yearBuilt; KC Assessor HTML is AJAX-only) ───
+//
+// IMPORTANT: KC Assessor's Dashboard.aspx / Detail.aspx are ASP.NET WebForms
+// pages that load all property data via __VIEWSTATE postback. The raw HTML
+// contains zero useful data — sqft, yearBuilt, beds, baths are all blank.
+// So we use RentCast (free tier 50 calls/mo) for cited comp enrichment.
+
+interface RentCastListing {
+  formattedAddress?: string;
+  price?: number;
+  squareFootage?: number;
+  bedrooms?: number;
+  bathrooms?: number;
+  yearBuilt?: number;
+  listedDate?: string;
+  removedDate?: string;
+  lastSeenDate?: string;
+  distance?: number;
+  propertyType?: string;
+  latitude?: number;
+  longitude?: number;
+}
+
+async function fetchRentCastSoldComps(
+  lat: number,
+  lng: number
+): Promise<RentCastListing[]> {
+  if (!RENTCAST_KEY || RENTCAST_KEY === "your_rentcast_api_key_here") {
+    return [];
+  }
+  // Pull SOLD listings within 1 mile, last 24 months. RentCast returns the
+  // sqft and yearBuilt we need for strategy-aware comp filtering.
+  const params = new URLSearchParams({
+    latitude: lat.toString(),
+    longitude: lng.toString(),
+    radius: "1",
+    propertyType: "Single Family",
+    status: "Sold",
+    limit: "30",
+    daysOld: "730",
+  });
+  try {
+    const res = await fetch(
+      `https://api.rentcast.io/v1/listings/sale?${params}`,
+      {
+        headers: { accept: "application/json", "X-Api-Key": RENTCAST_KEY },
+        next: { revalidate: 86400 },
+      }
+    );
+    if (!res.ok) {
+      console.error("RentCast comps error:", res.status);
+      return [];
+    }
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.error("RentCast fetch failed:", err);
+    return [];
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PropertyInfo helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -126,17 +189,10 @@ async function getAssessorDetails(pin: string): Promise<AssessorBits | null> {
   }
 }
 
-// Limit concurrent assessor fetches so we don't hammer KC.
-async function fetchAssessorBatch(pins: string[]): Promise<Record<string, AssessorBits | null>> {
-  const out: Record<string, AssessorBits | null> = {};
-  const CONCURRENCY = 5;
-  for (let i = 0; i < pins.length; i += CONCURRENCY) {
-    const chunk = pins.slice(i, i + CONCURRENCY);
-    const results = await Promise.all(chunk.map((p) => getAssessorDetails(p)));
-    chunk.forEach((pin, idx) => (out[pin] = results[idx]));
-  }
-  return out;
-}
+// NOTE: fetchAssessorBatch removed — KC Assessor HTML is AJAX-loaded and
+// returns no useful raw HTML for sqft/yearBuilt. RentCast (see fetchRentCastSoldComps)
+// is now the source of truth for comp enrichment. The single-property
+// getAssessorDetails above is retained for the subject (best-effort only).
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Neighborhood assembly
@@ -228,37 +284,127 @@ async function buildNeighborhood(
   // UI defaults to showing 10 but can drill in.
   const topSales = salesRaw.slice(0, 20);
 
-  // 3. Fetch assessor sqft for the citation sales (parallel, capped).
-  const assessorByPin = await fetchAssessorBatch(topSales.map((s) => s.PIN));
+  // 3. Comp enrichment via RentCast (has real sqft + yearBuilt).
+  //    The KC Assessor scrape we used to do here returns 0 for every field
+  //    because the HTML is AJAX-loaded — see comment near fetchRentCastSoldComps.
+  const rentCastComps = await fetchRentCastSoldComps(lat, lng);
 
-  const sales: Comp[] = topSales.map((s): Comp => {
-    const ab = assessorByPin[s.PIN];
-    const sqft = ab?.sqftLiving;
-    const yearBuilt = ab?.yearBuilt && ab.yearBuilt > 1800 ? ab.yearBuilt : undefined;
-    const typo = bucketParcelByPreuse(s.Principal_Use);
-    const salePrice = Number(s.SalePrice ?? 0);
-    const saleTs = parseSaleDate(s.SaleDate);
-    const saleYear = saleTs > 0 ? new Date(saleTs).getFullYear() : new Date().getFullYear();
-    // Classify as new construction at time of sale if built within 5 years prior.
+  // Build address→RentCast map for matching against KC sales.
+  // Normalize addresses for matching (strip case, punctuation, USPS abbrevs).
+  const normalizeAddr = (s: string): string =>
+    s.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
+  const rcByAddr = new Map<string, RentCastListing>();
+  for (const r of rentCastComps) {
+    if (r.formattedAddress) {
+      // Index by full normalized address plus by just the street part (everything before the city).
+      const full = normalizeAddr(r.formattedAddress);
+      rcByAddr.set(full, r);
+      const streetOnly = normalizeAddr(r.formattedAddress.split(",")[0] ?? "");
+      if (streetOnly) rcByAddr.set(streetOnly, r);
+    }
+  }
+
+  const matchRentCast = (kcAddress: string): RentCastListing | undefined => {
+    if (!kcAddress) return undefined;
+    const full = normalizeAddr(kcAddress);
+    const direct = rcByAddr.get(full);
+    if (direct) return direct;
+    // Try the first comma-split chunk (KC address may include city/state)
+    const streetOnly = normalizeAddr(kcAddress.split(",")[0] ?? "");
+    return rcByAddr.get(streetOnly);
+  };
+
+  const buildComp = (
+    pin: string,
+    address: string,
+    salePrice: number,
+    saleDate: string,
+    principalUse: string,
+    rc?: RentCastListing
+  ): Comp => {
+    const sqft = rc?.squareFootage && rc.squareFootage > 200 ? rc.squareFootage : undefined;
+    const yearBuilt = rc?.yearBuilt && rc.yearBuilt > 1800 ? rc.yearBuilt : undefined;
+    const saleTs = Date.parse(saleDate);
+    const saleYear = !isNaN(saleTs)
+      ? new Date(saleTs).getFullYear()
+      : new Date().getFullYear();
     const isNewConstructionAtSale =
       yearBuilt !== undefined && yearBuilt >= saleYear - 5;
     return {
-      pin: s.PIN,
-      address: s.address ?? "Unknown",
+      pin,
+      address,
       salePrice,
-      saleDate: typeof s.SaleDate === "number"
-        ? new Date(s.SaleDate).toISOString().slice(0, 10)
-        : String(s.SaleDate ?? ""),
-      principalUse: s.Principal_Use ?? "",
-      typology: typo,
-      sqftLiving: sqft && sqft > 200 ? sqft : undefined,
+      saleDate,
+      principalUse,
+      typology: bucketParcelByPreuse(principalUse),
+      sqftLiving: sqft,
       yearBuilt,
       isNewConstructionAtSale,
-      pricePerSqft: sqft && sqft > 200 && salePrice ? Math.round(salePrice / sqft) : undefined,
-      sourceUrl: KC_ASSESSOR_DETAIL(s.PIN),
-      parcelViewerUrl: KC_PARCEL_VIEWER(s.PIN),
+      pricePerSqft: sqft && salePrice ? Math.round(salePrice / sqft) : undefined,
+      sourceUrl: pin ? KC_ASSESSOR_DETAIL(pin) : "",
+      parcelViewerUrl: pin ? KC_PARCEL_VIEWER(pin) : undefined,
     };
+  };
+
+  // Strategy A: enrich KC sales with RentCast matches (preserve KC drill-in URLs).
+  const enrichedFromKc: Comp[] = topSales.map((s) => {
+    const rc = matchRentCast(s.address ?? "");
+    const salePrice = Number(s.SalePrice ?? 0);
+    const saleDate =
+      typeof s.SaleDate === "number"
+        ? new Date(s.SaleDate).toISOString().slice(0, 10)
+        : String(s.SaleDate ?? "");
+    return buildComp(s.PIN, s.address ?? "Unknown", salePrice, saleDate, s.Principal_Use ?? "", rc);
   });
+
+  // Strategy B: if KC matching didn't yield enough enriched comps, supplement
+  // with RentCast-only comps that didn't match any KC sale (no PIN, no drill-in).
+  const matchedAddrs = new Set(
+    enrichedFromKc
+      .filter((c) => c.sqftLiving !== undefined)
+      .map((c) => normalizeAddr(c.address))
+  );
+  const unmatchedRc: Comp[] = rentCastComps
+    .filter((r) => {
+      if (!r.formattedAddress || !r.price) return false;
+      return !matchedAddrs.has(normalizeAddr(r.formattedAddress));
+    })
+    .slice(0, 10)
+    .map((r): Comp => {
+      const sqft = r.squareFootage && r.squareFootage > 200 ? r.squareFootage : undefined;
+      const yearBuilt = r.yearBuilt && r.yearBuilt > 1800 ? r.yearBuilt : undefined;
+      const saleDate = r.lastSeenDate || r.removedDate || r.listedDate || "";
+      const saleTs = Date.parse(saleDate);
+      const saleYear = !isNaN(saleTs)
+        ? new Date(saleTs).getFullYear()
+        : new Date().getFullYear();
+      return {
+        pin: "",
+        address: r.formattedAddress ?? "Unknown",
+        salePrice: r.price ?? 0,
+        saleDate: saleDate ? saleDate.slice(0, 10) : "",
+        principalUse: r.propertyType ?? "Single Family",
+        typology: "sfr",
+        sqftLiving: sqft,
+        yearBuilt,
+        isNewConstructionAtSale:
+          yearBuilt !== undefined && yearBuilt >= saleYear - 5,
+        pricePerSqft:
+          sqft && r.price ? Math.round(r.price / sqft) : undefined,
+        sourceUrl: `https://www.redfin.com/?q=${encodeURIComponent(r.formattedAddress ?? "")}`,
+        parcelViewerUrl: undefined,
+      };
+    });
+
+  // Combine: prefer enriched KC sales first (have drill-in URLs), then top up
+  // with RentCast-only comps to ensure ≥10 comps with sqft data when possible.
+  const enrichedKcWithSqft = enrichedFromKc.filter((c) => c.sqftLiving !== undefined);
+  const enrichedKcWithoutSqft = enrichedFromKc.filter((c) => c.sqftLiving === undefined);
+  const sales: Comp[] = [
+    ...enrichedKcWithSqft,
+    ...unmatchedRc,
+    ...enrichedKcWithoutSqft,
+  ].slice(0, 15);
 
   // 4. Trend signal: recent non-SFR sales in last 24 months.
   const trendCutoff = monthsAgo(TREND_LOOKBACK_MONTHS);
