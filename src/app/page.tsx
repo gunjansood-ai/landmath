@@ -161,6 +161,8 @@ export default function Home() {
         subjectAssessorUrl: parcel?.assessorUrl ?? null,
         subjectParcelViewerUrl: parcel?.parcelViewerUrl ?? null,
         isKingCounty: propertyData.isKingCounty ?? false,
+        lat: geo.lat,
+        lng: geo.lng,
       };
 
       setCurrentProperty(property);

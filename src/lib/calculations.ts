@@ -4,6 +4,8 @@ import {
   FinancingConfig,
   PropertyData,
   AnalysisResult,
+  TownhomeInputs,
+  MultiFamilyInputs,
 } from "@/store/useStore";
 import {
   computeConfidence,
@@ -70,6 +72,16 @@ export const STRATEGIES: Record<
     label: "Flip & Fix",
     tagline: "Renovate and cash out",
     icon: "wrench",
+  },
+  townhome: {
+    label: "Townhome",
+    tagline: "Row houses, sell each unit",
+    icon: "rows",
+  },
+  multifamily: {
+    label: "Multi-Family",
+    tagline: "Condo or income-producing complex",
+    icon: "building2",
   },
   pass: {
     label: "Pass",
@@ -163,6 +175,23 @@ export function checkFeasibility(
       return "not_allowed";
     case "flip_fix":
       return "permitted";
+    case "townhome": {
+      // Townhomes require R-2, RM, or similar attached-housing zoning.
+      // Without a full zoning KB, we approximate: lots ≥6000 sqft in urban zones = conditional.
+      const upper = (property.zoningCode ?? "").toUpperCase();
+      const permittedPatterns = /R-?[2-9]|RM|TH|MF|MU|C[12]/;
+      if (permittedPatterns.test(upper)) return "permitted";
+      if (lotSize >= 8000) return "conditional";
+      return "not_allowed";
+    }
+    case "multifamily": {
+      // Multi-family requires higher-density zoning (R-3+, RM, MF, MU).
+      const upper = (property.zoningCode ?? "").toUpperCase();
+      const permittedPatterns = /R-?[3-9]|RM|MF|MU|C[12]/;
+      if (permittedPatterns.test(upper)) return "permitted";
+      if (lotSize >= 12000) return "conditional";
+      return "not_allowed";
+    }
     default:
       return "not_allowed";
   }
@@ -1161,6 +1190,373 @@ export function analyzeAllStrategies(
     analyses: annotated, // all four, in fixed order, top-2 marked
     additional: [],      // kept for back-compat; UI no longer uses a separate pane
     recommended,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TOWNHOME ANALYSIS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Calculate townhome / row-house strategy metrics.
+ * All units are assumed to sell fee-simple on completion.
+ */
+export function calculateTownhomeAnalysis(
+  property: PropertyData,
+  inputs: TownhomeInputs,
+  tier: QualityTier,
+  costPerSqft: number,
+  financing: FinancingConfig
+): AnalysisResult {
+  const { unitCount, avgUnitSqft, hoaSetupCost, sharedInfraCost, salePricePerUnit } = inputs;
+
+  const feasibility = checkFeasibility(property, "townhome");
+
+  // ── Timeline ──────────────────────────────────────────────────────────────
+  // Townhomes: longer permit (city review for attached), but build faster per sqft
+  // than SFR due to shared structure and repeated floor plans.
+  const permitMonths = 8;
+  const totalSqft = unitCount * avgUnitSqft;
+  // ~500 sqft/month (faster than SFR's 400 sqft/mo due to repetition)
+  const buildMonths = Math.ceil((totalSqft / 500) * QUALITY_TIERS[tier].timeMultiplier);
+  const sellMonths = 3; // units sell sequentially, avg 3mo to clear
+  const timelineMonths = permitMonths + buildMonths + sellMonths;
+
+  // ── Costs ─────────────────────────────────────────────────────────────────
+  const purchasePrice = property.listingPrice;
+  const closingCosts = purchasePrice * 0.025;
+  const acquisitionCost = purchasePrice + closingCosts;
+
+  // Attached housing builds for ~82% of standalone SFR cost/sqft:
+  // shared walls, shared foundation runs, shared rooflines reduce per-unit cost.
+  const attachedCostPerSqft = Math.round(costPerSqft * 0.82);
+
+  const demolitionCost = 20000;
+  const architectFees = totalSqft * attachedCostPerSqft * 0.05;
+  const permitFees = 30000 + unitCount * 3000; // per-unit permit fees
+  const contingency = totalSqft * attachedCostPerSqft * 0.12;
+  const landscaping = 15000 + unitCount * 3000;
+  const constructionCost =
+    totalSqft * attachedCostPerSqft +
+    demolitionCost +
+    architectFees +
+    permitFees +
+    contingency +
+    landscaping +
+    hoaSetupCost +
+    sharedInfraCost;
+
+  // ── Holding costs ─────────────────────────────────────────────────────────
+  const downPayment = purchasePrice * (financing.downPaymentPct / 100);
+  const loanAmount = purchasePrice - downPayment;
+  const monthlyMortgage = calculateMonthlyPayment(
+    loanAmount,
+    financing.interestRate,
+    financing.loanTermYears,
+    financing.type === "interest_only"
+  );
+  const holdingCostMonthly =
+    monthlyMortgage +
+    property.annualPropertyTax / 12 +
+    (purchasePrice * 0.004) / 12 +
+    300;
+  const totalHoldingCost = holdingCostMonthly * timelineMonths;
+
+  // ── Revenue ───────────────────────────────────────────────────────────────
+  // salePricePerUnit = 0 means auto-estimate from comps (use neighborhood data)
+  let effectiveSalePricePerUnit = salePricePerUnit;
+  if (!effectiveSalePricePerUnit || effectiveSalePricePerUnit === 0) {
+    // Estimate: use attached/condo comps if available, else fall back to SFR comps
+    const compResult = getDefaultSellPricePerSqft(property, tier, "fresh_build");
+    // Townhomes trade at ~90% of SFR comparable (attached vs detached discount)
+    effectiveSalePricePerUnit = Math.round(compResult.value * avgUnitSqft * 0.90);
+  }
+
+  const agentCommission = (effectiveSalePricePerUnit * unitCount) * 0.05;
+  const exciseTax = (effectiveSalePricePerUnit * unitCount) * 0.018;
+  const sellerConcessions = (effectiveSalePricePerUnit * unitCount) * 0.01;
+  const sellingCosts = agentCommission + exciseTax + sellerConcessions + 5000;
+  const expectedSalePrice = effectiveSalePricePerUnit * unitCount;
+
+  // ── Profit ────────────────────────────────────────────────────────────────
+  const totalProjectCost = acquisitionCost + constructionCost + totalHoldingCost + sellingCosts;
+  const profit = expectedSalePrice - totalProjectCost;
+  const totalCashInvested = downPayment + constructionCost + totalHoldingCost + closingCosts;
+  const roi = totalCashInvested > 0 ? (profit / totalCashInvested) * 100 : 0;
+  const annualizedRoi = timelineMonths > 0 ? roi * (12 / timelineMonths) : 0;
+  const profitPerUnit = unitCount > 0 ? Math.round(profit / unitCount) : 0;
+
+  const recommendation =
+    feasibility === "not_allowed"
+      ? `Townhome/row house development appears not permitted under zoning ${property.zoningCode}. Verify with the city.`
+      : profit > 0 && roi > 15
+      ? `Townhome build projects ${formatCurrency(profit)} profit (${roi.toFixed(1)}% ROI) across ${unitCount} units over ${timelineMonths} months — ${formatCurrency(profitPerUnit)}/unit.`
+      : profit > 0
+      ? `Marginal townhome deal — ${formatCurrency(profit)} profit at ${roi.toFixed(1)}% ROI. Consider reducing unit count or negotiating acquisition.`
+      : `Townhome not viable at current numbers. Projects a ${formatCurrency(Math.abs(profit))} loss.`;
+
+  return {
+    id: `${property.id}-townhome-${Date.now()}`,
+    propertyId: property.id,
+    property,
+    strategy: "townhome",
+    qualityTier: tier,
+    costPerSqft,
+    buildSqft: Math.round(totalSqft),
+    financing,
+    acquisitionCost: Math.round(acquisitionCost),
+    constructionCost: Math.round(constructionCost),
+    holdingCostMonthly: Math.round(holdingCostMonthly),
+    totalHoldingCost: Math.round(totalHoldingCost),
+    sellingCosts: Math.round(sellingCosts),
+    totalProjectCost: Math.round(totalProjectCost),
+    expectedSalePrice: Math.round(expectedSalePrice),
+    profit: Math.round(profit),
+    roi: Math.round(roi * 10) / 10,
+    annualizedRoi: Math.round(annualizedRoi * 10) / 10,
+    timelineMonths,
+    permitMonths,
+    buildMonths,
+    sellMonths,
+    feasibility,
+    recommendation,
+    createdAt: new Date().toISOString(),
+    // Townhome-specific
+    unitCount,
+    profitPerUnit,
+    costPerUnit: Math.round(totalProjectCost / Math.max(unitCount, 1)),
+    revenuePerUnit: Math.round(expectedSalePrice / Math.max(unitCount, 1)),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MULTI-FAMILY ANALYSIS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Calculate multi-family / condo analysis.
+ * Supports two exit paths:
+ *   - "rent"  → NOI, cap rate, GRM, cash-on-cash
+ *   - "sell"  → profit, ROI, margin per unit (condo conversion)
+ */
+export function calculateMultiFamilyAnalysis(
+  property: PropertyData,
+  inputs: MultiFamilyInputs,
+  tier: QualityTier,
+  costPerSqft: number,
+  financing: FinancingConfig
+): AnalysisResult {
+  const {
+    exitType,
+    studioCount, oneBrCount, twoBrCount,
+    avgUnitSqft,
+    studioRent, oneBrRent, twoBrRent,
+    vacancyRate,
+    operatingExpenseRatio,
+    condoConversionCost,
+    salePricePerUnit,
+  } = inputs;
+
+  const totalUnits = studioCount + oneBrCount + twoBrCount;
+  const feasibility = checkFeasibility(property, "multifamily");
+
+  // ── Timeline ──────────────────────────────────────────────────────────────
+  const permitMonths = 10; // full environmental review + design approval
+  const totalSqft = totalUnits * avgUnitSqft;
+  // MF builds at ~700 sqft/month — stacked/repetitive floor plans are the most
+  // efficient residential construction type. Faster than SFR (400) or townhome (500).
+  const buildMonths = Math.ceil((totalSqft / 700) * QUALITY_TIERS[tier].timeMultiplier);
+  // Sell exit: takes longer to condo-convert + sell; rent exit: occupied sooner
+  const sellMonths = exitType === "sell" ? 4 : 1;
+  const timelineMonths = permitMonths + buildMonths + sellMonths;
+
+  // ── Costs ─────────────────────────────────────────────────────────────────
+  const purchasePrice = property.listingPrice;
+  const closingCosts = purchasePrice * 0.025;
+  const acquisitionCost = purchasePrice + closingCosts;
+
+  // MF stacked units build at ~75% of SFR $/sqft — highest efficiency of any
+  // residential type (shared vertical structure, mechanical chases, elevators spread
+  // across many units). This is the standard industry adjustment.
+  const mfCostPerSqft = Math.round(costPerSqft * 0.75);
+
+  const demolitionCost = 25000;
+  const architectFees = totalSqft * mfCostPerSqft * 0.06; // MF needs more detailed plans
+  const permitFees = 40000 + totalUnits * 4000;
+  const contingency = totalSqft * mfCostPerSqft * 0.12;
+  const commonAreaCost = totalUnits * 8000; // hallways, lobby, amenities
+  const condoConversionTotal = exitType === "sell" ? condoConversionCost * totalUnits : 0;
+  const landscaping = 20000;
+  const constructionCost =
+    totalSqft * mfCostPerSqft +
+    demolitionCost +
+    architectFees +
+    permitFees +
+    contingency +
+    commonAreaCost +
+    condoConversionTotal +
+    landscaping;
+
+  // ── Holding costs ─────────────────────────────────────────────────────────
+  const downPayment = purchasePrice * (financing.downPaymentPct / 100);
+  const loanAmount = purchasePrice - downPayment;
+  const monthlyMortgage = calculateMonthlyPayment(
+    loanAmount,
+    financing.interestRate,
+    financing.loanTermYears,
+    financing.type === "interest_only"
+  );
+  const holdingCostMonthly =
+    monthlyMortgage +
+    property.annualPropertyTax / 12 +
+    (purchasePrice * 0.004) / 12 +
+    300;
+  const totalHoldingCost = holdingCostMonthly * timelineMonths;
+  const totalProjectCost = acquisitionCost + constructionCost + totalHoldingCost;
+
+  // ── RENT EXIT ─────────────────────────────────────────────────────────────
+  if (exitType === "rent") {
+    // Weighted gross monthly rent
+    const grossMonthlyRent =
+      studioCount * studioRent + oneBrCount * oneBrRent + twoBrCount * twoBrRent;
+    const grossRentalIncome = grossMonthlyRent * 12; // annual
+    const effectiveGrossIncome = grossRentalIncome * (1 - vacancyRate);
+    const operatingExpenses = effectiveGrossIncome * operatingExpenseRatio;
+    const noi = effectiveGrossIncome - operatingExpenses;
+
+    const capRate = totalProjectCost > 0 ? (noi / totalProjectCost) * 100 : 0;
+    const grm = grossRentalIncome > 0 ? totalProjectCost / grossRentalIncome : 0;
+
+    // Annual debt service — permanent MF loan at 75% LTV on stabilized value,
+    // using a 30-year amortization (standard agency/DSCR structure).
+    const totalLoan = totalProjectCost * 0.75;
+    const annualDebtService =
+      calculateMonthlyPayment(totalLoan, financing.interestRate, 30) * 12;
+    const equity = totalProjectCost - totalLoan;
+    const cashOnCash = equity > 0 ? ((noi - annualDebtService) / equity) * 100 : 0;
+    const breakEvenOccupancy =
+      grossRentalIncome > 0
+        ? ((operatingExpenses + annualDebtService) / grossRentalIncome) * 100
+        : 0;
+
+    // For comparability with sell strategies, compute "paper profit" as
+    // capitalized value minus cost (at 5.5% stabilized cap).
+    const stabilizedCapRate = 0.055;
+    const capitalizedValue = stabilizedCapRate > 0 ? noi / stabilizedCapRate : 0;
+    const profit = capitalizedValue - totalProjectCost;
+    const roi = equity > 0 ? cashOnCash : 0;
+
+    const recommendation =
+      feasibility === "not_allowed"
+        ? `Multi-family appears not permitted under ${property.zoningCode}. Verify with the city.`
+        : capRate >= 7
+        ? `Strong rental investment — ${capRate.toFixed(1)}% cap rate, ${cashOnCash.toFixed(1)}% cash-on-cash. NOI: ${formatCurrency(noi)}/yr.`
+        : capRate >= 5
+        ? `Moderate rental return — ${capRate.toFixed(1)}% cap rate. Consider reducing construction budget or increasing rents.`
+        : `Thin rental margins — ${capRate.toFixed(1)}% cap rate. Underwriting may not support the build cost.`;
+
+    return {
+      id: `${property.id}-multifamily-${Date.now()}`,
+      propertyId: property.id,
+      property,
+      strategy: "multifamily",
+      qualityTier: tier,
+      costPerSqft,
+      buildSqft: Math.round(totalSqft),
+      financing,
+      acquisitionCost: Math.round(acquisitionCost),
+      constructionCost: Math.round(constructionCost),
+      holdingCostMonthly: Math.round(holdingCostMonthly),
+      totalHoldingCost: Math.round(totalHoldingCost),
+      sellingCosts: 0,
+      totalProjectCost: Math.round(totalProjectCost),
+      expectedSalePrice: Math.round(capitalizedValue),
+      profit: Math.round(profit),
+      roi: Math.round(roi * 10) / 10,
+      annualizedRoi: Math.round((roi * (12 / timelineMonths)) * 10) / 10,
+      timelineMonths,
+      permitMonths,
+      buildMonths,
+      sellMonths,
+      feasibility,
+      recommendation,
+      createdAt: new Date().toISOString(),
+      // MF-specific
+      unitCount: totalUnits,
+      exitType: "rent",
+      grossRentalIncome: Math.round(grossRentalIncome),
+      effectiveGrossIncome: Math.round(effectiveGrossIncome),
+      noi: Math.round(noi),
+      capRate: Math.round(capRate * 10) / 10,
+      grm: Math.round(grm * 10) / 10,
+      cashOnCash: Math.round(cashOnCash * 10) / 10,
+      breakEvenOccupancy: Math.round(breakEvenOccupancy * 10) / 10,
+      debtService: Math.round(annualDebtService),
+      costPerUnit: Math.round(totalProjectCost / Math.max(totalUnits, 1)),
+    };
+  }
+
+  // ── SELL EXIT (condo conversion) ──────────────────────────────────────────
+  let effectiveSalePricePerUnit = salePricePerUnit;
+  if (!effectiveSalePricePerUnit || effectiveSalePricePerUnit === 0) {
+    const compResult = getDefaultSellPricePerSqft(property, tier, "fresh_build");
+    // MF units sell at ~85% of SFR $/sqft (smaller units, shared walls)
+    effectiveSalePricePerUnit = Math.round(compResult.value * avgUnitSqft * 0.85);
+  }
+
+  const totalRevenue = effectiveSalePricePerUnit * totalUnits;
+  const agentCommission = totalRevenue * 0.05;
+  const exciseTax = totalRevenue * 0.018;
+  const sellingCosts = agentCommission + exciseTax + totalRevenue * 0.01 + 5000;
+  const expectedSalePrice = totalRevenue;
+
+  const profit = expectedSalePrice - totalProjectCost - sellingCosts;
+  const totalCashInvested = downPayment + constructionCost + totalHoldingCost + closingCosts;
+  const roi = totalCashInvested > 0 ? (profit / totalCashInvested) * 100 : 0;
+  const annualizedRoi = timelineMonths > 0 ? roi * (12 / timelineMonths) : 0;
+  const profitPerUnit = totalUnits > 0 ? Math.round(profit / totalUnits) : 0;
+
+  const recommendation =
+    feasibility === "not_allowed"
+      ? `Multi-family condo appears not permitted under ${property.zoningCode}. Verify with the city.`
+      : profit > 0 && roi > 15
+      ? `Condo conversion projects ${formatCurrency(profit)} profit (${roi.toFixed(1)}% ROI) across ${totalUnits} units — ${formatCurrency(profitPerUnit)}/unit.`
+      : profit > 0
+      ? `Marginal condo deal — ${formatCurrency(profit)} profit at ${roi.toFixed(1)}% ROI. Thin margins for the complexity.`
+      : `Condo conversion not viable at current numbers. Projects a ${formatCurrency(Math.abs(profit))} loss.`;
+
+  return {
+    id: `${property.id}-multifamily-${Date.now()}`,
+    propertyId: property.id,
+    property,
+    strategy: "multifamily",
+    qualityTier: tier,
+    costPerSqft,
+    buildSqft: Math.round(totalSqft),
+    financing,
+    acquisitionCost: Math.round(acquisitionCost),
+    constructionCost: Math.round(constructionCost),
+    holdingCostMonthly: Math.round(holdingCostMonthly),
+    totalHoldingCost: Math.round(totalHoldingCost),
+    sellingCosts: Math.round(sellingCosts),
+    totalProjectCost: Math.round(totalProjectCost),
+    expectedSalePrice: Math.round(expectedSalePrice),
+    profit: Math.round(profit),
+    roi: Math.round(roi * 10) / 10,
+    annualizedRoi: Math.round(annualizedRoi * 10) / 10,
+    timelineMonths,
+    permitMonths,
+    buildMonths,
+    sellMonths,
+    feasibility,
+    recommendation,
+    createdAt: new Date().toISOString(),
+    // MF-specific
+    unitCount: totalUnits,
+    exitType: "sell",
+    profitPerUnit,
+    costPerUnit: Math.round(totalProjectCost / Math.max(totalUnits, 1)),
+    revenuePerUnit: Math.round(expectedSalePrice / Math.max(totalUnits, 1)),
   };
 }
 
