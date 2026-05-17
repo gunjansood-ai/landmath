@@ -13,12 +13,14 @@ import {
   CheckCircle2,
   AlertTriangle,
   Ban,
-  DollarSign,
   Clock,
   TrendingUp,
   ChevronDown,
   ChevronUp,
   ExternalLink,
+  ShieldCheck,
+  Info,
+  AlertOctagon,
 } from "lucide-react";
 import Navigation from "@/components/Navigation";
 import { useStore, Strategy, QualityTier, FinancingConfig } from "@/store/useStore";
@@ -28,12 +30,10 @@ import {
   formatPercent,
   STRATEGIES,
   QUALITY_TIERS,
-  DEFAULT_COST_PER_SQFT,
   DEFAULT_SELL_PRICE_PER_SQFT,
-  getDefaultBuildSqft,
-  calculateMonthlyPayment,
   StrategyOverrides,
 } from "@/lib/calculations";
+import type { TypologyBucket } from "@/lib/buildability";
 
 const strategyIcons: Record<Strategy, React.ReactNode> = {
   fresh_build: <Building2 size={22} />,
@@ -67,6 +67,69 @@ const feasibilityBadge = (f: string) => {
 };
 
 const tierLabels: QualityTier[] = ["standard", "premium", "luxury", "ultra_luxury"];
+
+// ── Architect-mode display helpers ──────────────────────────────────────────
+
+const TYPOLOGY_LABELS: Record<TypologyBucket, string> = {
+  sfr: "Single-family",
+  sfr_with_adu: "SFR + ADU",
+  duplex: "Duplex",
+  triplex: "Triplex",
+  fourplex: "Fourplex",
+  five_plus: "5+ units",
+  condo: "Condo",
+  other: "Other",
+};
+
+const TYPOLOGY_COLORS: Record<TypologyBucket, string> = {
+  sfr: "bg-green-500",
+  sfr_with_adu: "bg-emerald-500",
+  duplex: "bg-blue-500",
+  triplex: "bg-indigo-500",
+  fourplex: "bg-violet-500",
+  five_plus: "bg-purple-500",
+  condo: "bg-pink-500",
+  other: "bg-gray-400",
+};
+
+function confidenceChip(score?: number, label?: string) {
+  if (typeof score !== "number") return null;
+  const tone =
+    score >= 85
+      ? "bg-green-50 text-green-700 border-green-200"
+      : score >= 65
+      ? "bg-blue-50 text-blue-700 border-blue-200"
+      : score >= 40
+      ? "bg-amber-50 text-amber-700 border-amber-200"
+      : "bg-red-50 text-red-700 border-red-200";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 text-xs font-medium border ${tone} px-2 py-0.5 rounded-full`}
+      title={`Confidence score: ${score}/100`}
+    >
+      <ShieldCheck size={11} /> {label ?? "—"} · {score}
+    </span>
+  );
+}
+
+function caveatIcon(sev: "info" | "warning" | "block") {
+  if (sev === "block") return <AlertOctagon size={13} className="text-red-500 flex-shrink-0 mt-0.5" />;
+  if (sev === "warning") return <AlertTriangle size={13} className="text-amber-500 flex-shrink-0 mt-0.5" />;
+  return <Info size={13} className="text-blue-500 flex-shrink-0 mt-0.5" />;
+}
+
+function caveatTone(sev: "info" | "warning" | "block") {
+  if (sev === "block") return "bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800/40 text-red-900 dark:text-red-300";
+  if (sev === "warning") return "bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800/40 text-amber-900 dark:text-amber-300";
+  return "bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800/40 text-blue-900 dark:text-blue-300";
+}
+
+function formatSaleDate(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "short" });
+}
 
 export default function PropertyAnalysis() {
   const router = useRouter();
@@ -118,10 +181,15 @@ export default function PropertyAnalysis() {
   };
 
   // Run analysis
-  const { analyses, recommended } = useMemo(() => {
-    if (!property) return { analyses: [], recommended: "pass" as Strategy };
+  const { analyses, additional, recommended } = useMemo(() => {
+    if (!property) {
+      return { analyses: [], additional: [], recommended: "pass" as Strategy };
+    }
     return analyzeAllStrategies(property, qualityTier, costPerSqft, financing, strategyOverrides);
   }, [property, qualityTier, costPerSqft, financing, strategyOverrides]);
+
+  const [showMoreStrategies, setShowMoreStrategies] = useState(false);
+  const [showComps, setShowComps] = useState(true);
 
   // Save to store
   useEffect(() => {
@@ -219,6 +287,103 @@ export default function PropertyAnalysis() {
             </div>
           ))}
         </div>
+
+        {/* Neighborhood Context — typology + size guardrail (architect-mode §5) */}
+        {property.neighborhood && (
+          <div className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-2xl p-5 mb-6">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="text-sm font-semibold text-gray-900 dark:text-white">
+                  Neighborhood Context
+                </h2>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  {property.neighborhood.parcelCount} residential parcels within{" "}
+                  {(property.neighborhood.radiusM / 1609).toFixed(2)} mi
+                  {property.neighborhood.recentMultiUnitCount >= 3 && (
+                    <span className="ml-2 inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                      <TrendingUp size={11} /> {property.neighborhood.recentMultiUnitCount} non-SFR/ADU sales last 24mo
+                    </span>
+                  )}
+                </p>
+              </div>
+              {property.neighborhood.isSparse && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 bg-amber-50 dark:bg-amber-900/20 px-2 py-0.5 rounded-full">
+                  <AlertTriangle size={11} /> Sparse sample
+                </span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {/* Size stats */}
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">Home size (recent sales)</p>
+                {property.neighborhood.medianHomeSqft ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3 text-sm">
+                      <span className="text-gray-500">Median</span>
+                      <span className="font-semibold text-gray-900 dark:text-white">
+                        {property.neighborhood.medianHomeSqft.toLocaleString()} sqft
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-gray-500">
+                      <span>P25 {property.neighborhood.p25HomeSqft?.toLocaleString()} sqft</span>
+                      <span>P75 {property.neighborhood.p75HomeSqft?.toLocaleString()} sqft</span>
+                    </div>
+                    <div className="text-xs text-gray-600 dark:text-gray-400 mt-2">
+                      Target build size (median × 1.175):{" "}
+                      <span className="font-medium text-gray-900 dark:text-white">
+                        {Math.round(property.neighborhood.medianHomeSqft * 1.175).toLocaleString()} sqft
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-400 italic">
+                    Living sqft not available for recent comps — size guardrail using zoning max only.
+                  </p>
+                )}
+              </div>
+
+              {/* Typology distribution */}
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-2">Structure types nearby</p>
+                {property.neighborhood.typology.total > 0 ? (
+                  <>
+                    <div className="flex h-3 rounded-full overflow-hidden bg-gray-100 dark:bg-slate-700">
+                      {(Object.keys(property.neighborhood.typology.counts) as TypologyBucket[])
+                        .filter((b) => property.neighborhood!.typology.counts[b] > 0)
+                        .map((b) => {
+                          const share = property.neighborhood!.typology.shares[b];
+                          return (
+                            <div
+                              key={b}
+                              className={TYPOLOGY_COLORS[b]}
+                              style={{ width: `${share * 100}%` }}
+                              title={`${TYPOLOGY_LABELS[b]}: ${(share * 100).toFixed(1)}% (${property.neighborhood!.typology.counts[b]} parcels)`}
+                            />
+                          );
+                        })}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2">
+                      {(Object.keys(property.neighborhood.typology.counts) as TypologyBucket[])
+                        .filter((b) => property.neighborhood!.typology.counts[b] > 0)
+                        .sort((a, b) =>
+                          property.neighborhood!.typology.counts[b] - property.neighborhood!.typology.counts[a]
+                        )
+                        .map((b) => (
+                          <span key={b} className="inline-flex items-center gap-1 text-[10px] text-gray-500 dark:text-gray-400">
+                            <span className={`w-2 h-2 rounded-full ${TYPOLOGY_COLORS[b]}`} />
+                            {TYPOLOGY_LABELS[b]} ({property.neighborhood!.typology.counts[b]})
+                          </span>
+                        ))}
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-xs text-gray-400 italic">No nearby parcel data.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Controls: Quality Tier + Financing */}
         <div className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-2xl p-5 mb-6">
@@ -347,8 +512,26 @@ export default function PropertyAnalysis() {
                         </p>
                       </div>
                     </div>
-                    {feasibilityBadge(analysis.feasibility)}
+                    <div className="flex flex-col items-end gap-1">
+                      {feasibilityBadge(analysis.feasibility)}
+                      {confidenceChip(analysis.confidence, analysis.confidenceLabel)}
+                    </div>
                   </div>
+
+                  {/* Caveats (typology + size guardrails) */}
+                  {analysis.caveats && analysis.caveats.length > 0 && (
+                    <div className="mt-3 space-y-1.5">
+                      {analysis.caveats.slice(0, 3).map((c, i) => (
+                        <div
+                          key={i}
+                          className={`flex items-start gap-2 text-[11px] leading-relaxed border rounded-lg px-2.5 py-1.5 ${caveatTone(c.severity)}`}
+                        >
+                          {caveatIcon(c.severity)}
+                          <span>{c.text}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Key metrics */}
                   <div className="grid grid-cols-3 gap-3 mt-4">
@@ -509,6 +692,54 @@ export default function PropertyAnalysis() {
           })}
         </div>
 
+        {/* Additional strategies (top-2 visible above; rest collapsed here) */}
+        {additional.length > 0 && (
+          <div className="mb-6">
+            <button
+              onClick={() => setShowMoreStrategies(!showMoreStrategies)}
+              className="flex items-center gap-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
+            >
+              {showMoreStrategies ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              {showMoreStrategies ? "Hide" : "Show"} other strategies ({additional.length})
+            </button>
+            {showMoreStrategies && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                {additional.map((a) => (
+                  <div
+                    key={a.strategy}
+                    className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-xl p-4 opacity-90"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-lg bg-gray-100 dark:bg-slate-700 text-gray-500 flex items-center justify-center">
+                          {strategyIcons[a.strategy]}
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900 dark:text-white">
+                            {STRATEGIES[a.strategy].label}
+                          </p>
+                          <p className="text-[11px] text-gray-500">
+                            {formatCurrency(a.profit)} · {formatPercent(a.roi)} ROI · {a.timelineMonths}mo
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-end gap-1">
+                        {feasibilityBadge(a.feasibility)}
+                        {confidenceChip(a.confidence, a.confidenceLabel)}
+                      </div>
+                    </div>
+                    {a.caveats && a.caveats.length > 0 && (
+                      <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400 italic">
+                        {a.caveats[0].text}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Bottom recommendation banner */}
         {recommended !== "pass" && (
           <div className="bg-green-600 text-white rounded-2xl p-6 text-center">
@@ -527,6 +758,109 @@ export default function PropertyAnalysis() {
             <XCircle size={32} className="mx-auto text-gray-400 mb-2" />
             <p className="text-lg font-bold text-gray-700 dark:text-gray-300">Pass on this property</p>
             <p className="text-sm text-gray-500 mt-1">The math doesn&apos;t work for any strategy at these numbers.</p>
+          </div>
+        )}
+
+        {/* Cited comps — every comp that fed the analysis, with drill-in links */}
+        {property.neighborhood && property.neighborhood.sales.length > 0 && (
+          <div className="mt-6 bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="text-sm font-semibold text-gray-900 dark:text-white">
+                  Comparable Sales — Sources
+                </h2>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  {property.neighborhood.sales.length} recent sales within 800 m. These are the comps the engine used —
+                  click any address to verify on the King County Assessor.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowComps(!showComps)}
+                className="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center gap-1"
+              >
+                {showComps ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                {showComps ? "Hide" : "Show"}
+              </button>
+            </div>
+
+            {showComps && (
+              <div className="overflow-x-auto -mx-5 px-5">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-[10px] uppercase tracking-wider text-gray-400 border-b border-gray-100 dark:border-slate-700">
+                      <th className="py-2 pr-3 font-medium">Address</th>
+                      <th className="py-2 pr-3 font-medium">Sold</th>
+                      <th className="py-2 pr-3 font-medium text-right">Price</th>
+                      <th className="py-2 pr-3 font-medium text-right">Sqft</th>
+                      <th className="py-2 pr-3 font-medium text-right">$/sqft</th>
+                      <th className="py-2 pr-3 font-medium">Type</th>
+                      <th className="py-2 pr-3 font-medium">Source</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {property.neighborhood.sales.map((c) => (
+                      <tr
+                        key={c.pin + c.saleDate}
+                        className="border-b border-gray-50 dark:border-slate-700/50 last:border-0"
+                      >
+                        <td className="py-2 pr-3">
+                          <a
+                            href={c.sourceUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-1"
+                          >
+                            {c.address}
+                            <ExternalLink size={10} />
+                          </a>
+                          <p className="text-[10px] text-gray-400 mt-0.5">PIN {c.pin}</p>
+                        </td>
+                        <td className="py-2 pr-3 text-gray-600 dark:text-gray-400">{formatSaleDate(c.saleDate)}</td>
+                        <td className="py-2 pr-3 text-right font-medium text-gray-900 dark:text-white">
+                          {formatCurrency(c.salePrice)}
+                        </td>
+                        <td className="py-2 pr-3 text-right text-gray-600 dark:text-gray-400">
+                          {c.sqftLiving ? c.sqftLiving.toLocaleString() : "—"}
+                        </td>
+                        <td className="py-2 pr-3 text-right text-gray-600 dark:text-gray-400">
+                          {c.pricePerSqft ? `$${c.pricePerSqft}` : "—"}
+                        </td>
+                        <td className="py-2 pr-3">
+                          <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full text-white ${TYPOLOGY_COLORS[c.typology]}`}>
+                            {TYPOLOGY_LABELS[c.typology]}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3">
+                          <div className="flex items-center gap-2">
+                            <a
+                              href={c.sourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[10px] text-gray-500 hover:text-blue-600 underline"
+                            >
+                              Assessor
+                            </a>
+                            {c.parcelViewerUrl && (
+                              <a
+                                href={c.parcelViewerUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[10px] text-gray-500 hover:text-blue-600 underline"
+                              >
+                                Map
+                              </a>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="text-[10px] text-gray-400 mt-3">
+                  Source: King County PropertyInfo / KC Assessor eRealProperty. Sales filtered to PRICE &gt; $100,000.
+                </p>
+              </div>
+            )}
           </div>
         )}
       </main>

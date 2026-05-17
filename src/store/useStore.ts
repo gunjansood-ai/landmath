@@ -1,5 +1,10 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import type {
+  Caveat,
+  NeighborhoodData,
+  TypologyFit,
+} from "@/lib/buildability";
 
 export type Strategy = "fresh_build" | "split_build" | "main_adu" | "flip_fix" | "pass";
 export type QualityTier = "standard" | "premium" | "luxury" | "ultra_luxury";
@@ -25,6 +30,12 @@ export interface PropertyData {
   garage: boolean;
   hoaMonthly: number;
   floodZone: boolean;
+  /** Neighborhood guardrail data (typology + cited comps). Optional for back-compat with persisted state. */
+  neighborhood?: NeighborhoodData;
+  /** Subject parcel assessor drill-in URL (KC for now). */
+  subjectAssessorUrl?: string | null;
+  /** Subject parcel viewer URL (KC for now). */
+  subjectParcelViewerUrl?: string | null;
 }
 
 export interface FinancingConfig {
@@ -62,6 +73,15 @@ export interface AnalysisResult {
   feasibility: "permitted" | "conditional" | "not_allowed";
   recommendation: string;
   createdAt: string;
+  // Architect-mode additions (all optional for back-compat):
+  confidence?: number;                  // 0–100
+  confidenceLabel?: "High" | "Moderate" | "Low" | "Speculative";
+  caveats?: Caveat[];
+  typologyFit?: TypologyFit;
+  typologyShare?: number;
+  trendBumpApplied?: boolean;
+  safeMaxSqft?: number;                 // size guardrail output (when comps allow)
+  isTopRecommendation?: boolean;        // true for the top-2 visible cards
 }
 
 export interface Settings {

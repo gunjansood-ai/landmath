@@ -5,6 +5,11 @@ import {
   PropertyData,
   AnalysisResult,
 } from "@/store/useStore";
+import {
+  computeConfidence,
+  computeNeighborhoodGuardrails,
+  type NeighborhoodGuardrails,
+} from "@/lib/buildability";
 
 // Cost per sqft by quality tier (WA state defaults)
 export const DEFAULT_COST_PER_SQFT: Record<QualityTier, number> = {
@@ -247,7 +252,24 @@ export function calculateAnalysis(
   overrides?: StrategyOverrides
 ): AnalysisResult {
   const feasibility = checkFeasibility(property, strategy);
-  const buildSqft = overrides?.buildSqft ?? getMaxBuildableSqft(property, strategy);
+  const maxByZoning = getMaxBuildableSqft(property, strategy);
+
+  // Neighborhood guardrails: applied when we have neighborhood data.
+  // Falls back to no-op when data is absent (e.g., outside KC for now).
+  let guardrails: NeighborhoodGuardrails | null = null;
+  let safeMaxSqft = maxByZoning;
+  if (property.neighborhood) {
+    guardrails = computeNeighborhoodGuardrails({
+      strategy,
+      neighborhood: property.neighborhood,
+      maxBuildableByZoning: maxByZoning,
+    });
+    if (guardrails.size.medianSqft) {
+      safeMaxSqft = guardrails.size.safeMaxSqft;
+    }
+  }
+
+  const buildSqft = overrides?.buildSqft ?? safeMaxSqft;
   const permitMonths = getPermitMonths(strategy);
   const buildMonths = getBuildMonths(strategy, tier, buildSqft);
   const expectedSalePrice = overrides?.sellPricePerSqft
@@ -318,6 +340,31 @@ export function calculateAnalysis(
     recommendation = `Not viable. Projects a ${formatCurrency(Math.abs(profit))} loss. Consider a different strategy or pass on this property.`;
   }
 
+  // Confidence scoring (architect-mode §6). Only meaningful when we have guardrails.
+  let confidenceScore: number | undefined;
+  let confidenceLabel: AnalysisResult["confidenceLabel"];
+  if (guardrails && property.neighborhood) {
+    const nb = property.neighborhood;
+    const recentCutoff = Date.now() - 12 * 30 * 24 * 60 * 60 * 1000;
+    const compsAreRecent = nb.sales.some((s) => {
+      const t = Date.parse(s.saleDate);
+      return !isNaN(t) && t >= recentCutoff;
+    });
+    const confidence = computeConfidence({
+      // For now we don't have a city-by-city KB plugged in (Wave 1 work),
+      // so "known" means we at least have a zoning code string and the
+      // KC PropertyInfo source is authoritative for KC parcels.
+      zoningKnown: Boolean(property.zoningCode && property.zoningCode !== "Unknown"),
+      zoningRecentlyVerified: false, // flip to true once KB lookup is wired
+      lotSizeFromGis: property.lotSizeSqft > 0,
+      compsCount: nb.sales.length,
+      compsAreRecent,
+      guardrails,
+    });
+    confidenceScore = confidence.score;
+    confidenceLabel = confidence.label;
+  }
+
   return {
     id: `${property.id}-${strategy}-${Date.now()}`,
     propertyId: property.id,
@@ -344,42 +391,85 @@ export function calculateAnalysis(
     feasibility,
     recommendation,
     createdAt: new Date().toISOString(),
+    confidence: confidenceScore,
+    confidenceLabel,
+    caveats: guardrails?.caveats,
+    typologyFit: guardrails?.typologyFit,
+    typologyShare: guardrails?.typologyShare,
+    trendBumpApplied: guardrails?.trendBumpApplied,
+    safeMaxSqft: guardrails?.size.medianSqft ? guardrails.size.safeMaxSqft : undefined,
   };
 }
 
-// Run all strategies and find best
+// Score combines ROI economics with confidence (when present).
+function scoreAnalysis(a: AnalysisResult): number {
+  const roiScore = a.roi * 0.3;
+  const annualizedScore = a.annualizedRoi * 0.25;
+  const riskScore =
+    (a.feasibility === "permitted" ? 10 : 5) *
+    (a.strategy === "flip_fix" ? 1.2 : 1) *
+    0.2;
+  const capitalScore = (1 - a.totalProjectCost / 5000000) * 10 * 0.15;
+  // Confidence (0–100) scaled into a similar magnitude as the other inputs.
+  const confidenceScore = ((a.confidence ?? 60) / 100) * 10 * 0.1;
+  return roiScore + annualizedScore + riskScore + capitalScore + confidenceScore;
+}
+
+/**
+ * Run all strategies. Returns:
+ *   - analyses: top-2 strategies by score (the visible cards)
+ *   - additional: remaining feasible strategies (drill-in)
+ *   - recommended: the #1 strategy (or "pass" if even the best is unprofitable)
+ *
+ * Per ARCHITECT_MODE_PLAN.md §5c we always render the top-2 regardless of
+ * typology fit so the user always sees a least-bad pair, never an empty page.
+ */
 export function analyzeAllStrategies(
   property: PropertyData,
   tier: QualityTier,
   costPerSqft: number,
   financing: FinancingConfig,
   strategyOverrides?: Partial<Record<Strategy, StrategyOverrides>>
-): { analyses: AnalysisResult[]; recommended: Strategy } {
+): {
+  analyses: AnalysisResult[];
+  additional: AnalysisResult[];
+  recommended: Strategy;
+} {
   const strategies: Strategy[] = ["fresh_build", "split_build", "main_adu", "flip_fix"];
-  const analyses = strategies.map((s) =>
+  const all = strategies.map((s) =>
     calculateAnalysis(property, s, tier, costPerSqft, financing, strategyOverrides?.[s])
   );
 
-  // Score and rank
-  const scored = analyses
+  const ranked = [...all]
     .filter((a) => a.feasibility !== "not_allowed")
-    .map((a) => {
-      const roiScore = a.roi * 0.3;
-      const annualizedScore = a.annualizedRoi * 0.25;
-      const riskScore =
-        (a.feasibility === "permitted" ? 10 : 5) *
-        (a.strategy === "flip_fix" ? 1.2 : 1) *
-        0.2;
-      const capitalScore = (1 - a.totalProjectCost / 5000000) * 10 * 0.15;
-      const certaintyScore = (a.feasibility === "permitted" ? 10 : 5) * 0.1;
-      return { ...a, score: roiScore + annualizedScore + riskScore + capitalScore + certaintyScore };
-    })
-    .sort((a, b) => b.score - a.score);
+    .map((a) => ({ ...a, _score: scoreAnalysis(a) }))
+    .sort((a, b) => b._score - a._score);
+
+  const top = ranked.slice(0, 2).map((r): AnalysisResult => {
+    const { _score: _omit, ...rest } = r;
+    void _omit;
+    return { ...rest, isTopRecommendation: true };
+  });
+  const additional = ranked.slice(2).map((r): AnalysisResult => {
+    const { _score: _omit, ...rest } = r;
+    void _omit;
+    return { ...rest, isTopRecommendation: false };
+  });
+
+  // Strategies marked not_allowed are kept in `additional` so the user can
+  // still see them with the "Not Allowed" badge if they expand.
+  const notAllowed = all
+    .filter((a) => a.feasibility === "not_allowed")
+    .map((a): AnalysisResult => ({ ...a, isTopRecommendation: false }));
 
   const recommended: Strategy =
-    scored.length > 0 && scored[0].profit > 0 ? scored[0].strategy : "pass";
+    top.length > 0 && top[0].profit > 0 ? top[0].strategy : "pass";
 
-  return { analyses, recommended };
+  return {
+    analyses: top,
+    additional: [...additional, ...notAllowed],
+    recommended,
+  };
 }
 
 // Utility

@@ -157,6 +157,9 @@ export default function Home() {
         garage: true,
         hoaMonthly: 0,
         floodZone: false,
+        neighborhood: propertyData.neighborhood ?? undefined,
+        subjectAssessorUrl: parcel?.assessorUrl ?? null,
+        subjectParcelViewerUrl: parcel?.parcelViewerUrl ?? null,
       };
 
       setCurrentProperty(property);
