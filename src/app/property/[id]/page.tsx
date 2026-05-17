@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -13,7 +13,6 @@ import {
   CheckCircle2,
   AlertTriangle,
   Ban,
-  Clock,
   TrendingUp,
   ChevronDown,
   ChevronUp,
@@ -23,14 +22,14 @@ import {
   AlertOctagon,
 } from "lucide-react";
 import Navigation from "@/components/Navigation";
-import { useStore, Strategy, QualityTier, FinancingConfig } from "@/store/useStore";
+import { useStore, Strategy, QualityTier, FinancingConfig, PropertyData, AnalysisResult } from "@/store/useStore";
 import {
   analyzeAllStrategies,
   formatCurrency,
   formatPercent,
   STRATEGIES,
   QUALITY_TIERS,
-  DEFAULT_SELL_PRICE_PER_SQFT,
+  getDefaultSellPricePerSqft,
   StrategyOverrides,
 } from "@/lib/calculations";
 import type { TypologyBucket } from "@/lib/buildability";
@@ -131,6 +130,356 @@ function formatSaleDate(iso: string): string {
   return d.toLocaleDateString("en-US", { year: "numeric", month: "short" });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ListPriceInput — editable list price with local state, commit on blur/Enter.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface ListPriceInputProps {
+  defaultValue: number;
+  originalValue: number;
+  onCommit: (value: number) => void;
+  hasOverride: boolean;
+  onReset: () => void;
+}
+
+function ListPriceInput({
+  defaultValue,
+  originalValue,
+  onCommit,
+  hasOverride,
+  onReset,
+}: ListPriceInputProps) {
+  // Derived-state-with-previous-value pattern (React 19 idiom): re-sync
+  // local input when parent's defaultValue prop changes (e.g., on Reset)
+  // without triggering an effect-driven cascade.
+  const [local, setLocal] = useState<string>(String(defaultValue));
+  const [prevDefault, setPrevDefault] = useState<number>(defaultValue);
+  if (prevDefault !== defaultValue) {
+    setPrevDefault(defaultValue);
+    setLocal(String(defaultValue));
+  }
+
+  const commit = () => {
+    const v = Math.round(Number(local.replace(/[^0-9.]/g, "")));
+    if (v > 0) onCommit(v);
+    else setLocal(String(originalValue));
+  };
+
+  return (
+    <div className="flex items-center gap-1 mt-0.5">
+      <span className="text-sm font-semibold text-gray-900 dark:text-white">$</span>
+      <input
+        type="number"
+        inputMode="numeric"
+        pattern="[0-9]*"
+        value={local}
+        onChange={(e) => setLocal(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.currentTarget.blur();
+          }
+        }}
+        className="w-full max-w-[100px] px-1 py-0.5 text-sm font-semibold bg-transparent border-b border-dashed border-gray-300 dark:border-slate-600 text-gray-900 dark:text-white focus:outline-none focus:border-green-500"
+      />
+      {hasOverride && (
+        <button
+          onClick={onReset}
+          className="text-[10px] text-gray-400 hover:text-red-500 underline ml-1 whitespace-nowrap"
+          title={`Reset to auto-detected ${formatCurrency(originalValue)}`}
+        >
+          Reset
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// StrategyCard — extracted with local input state so typing doesn't churn
+// the parent analysis tree on every keystroke (mobile focus fix).
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface StrategyCardProps {
+  analysis: AnalysisResult;
+  isBest: boolean;
+  override: StrategyOverrides | undefined;
+  onCommitOverride: (field: "buildSqft" | "sellPricePerSqft", v: number | undefined) => void;
+  onResetOverride: () => void;
+  defaultSellPpsf: number;
+  defaultSellSource: "neighborhood" | "wa_fallback";
+  defaultSellHint: string;
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  redfinUrl: string;
+}
+
+function StrategyCard({
+  analysis,
+  isBest,
+  override,
+  onCommitOverride,
+  onResetOverride,
+  defaultSellPpsf,
+  defaultSellSource,
+  defaultSellHint,
+  expanded,
+  onToggleExpanded,
+  redfinUrl,
+}: StrategyCardProps) {
+  // Local input strings — committed only on blur/Enter so the parent
+  // analysis doesn't recompute (and remount the input) on every keystroke.
+  // The parent uses `key={`${strategy}-${qualityTier}`}` to remount this
+  // card when tier changes, so we don't need an effect to re-sync defaults.
+  const [localBuildSqft, setLocalBuildSqft] = useState<string>(
+    String(override?.buildSqft ?? analysis.buildSqft)
+  );
+  const [localSellPpsf, setLocalSellPpsf] = useState<string>(
+    String(override?.sellPricePerSqft ?? defaultSellPpsf)
+  );
+
+  const commitBuild = () => {
+    const v = Math.round(Number(localBuildSqft));
+    onCommitOverride("buildSqft", v > 0 ? v : undefined);
+  };
+  const commitSell = () => {
+    const v = Math.round(Number(localSellPpsf));
+    onCommitOverride("sellPricePerSqft", v > 0 ? v : undefined);
+  };
+
+  const isMuted = !analysis.isTopRecommendation;
+
+  return (
+    <div
+      className={`bg-white dark:bg-slate-800 border-2 rounded-2xl overflow-hidden transition-all ${
+        isBest
+          ? "border-green-500 shadow-lg shadow-green-500/10"
+          : analysis.isTopRecommendation
+          ? "border-gray-200 dark:border-slate-600"
+          : "border-gray-100 dark:border-slate-700 opacity-95"
+      }`}
+    >
+      <div className="p-5">
+        {isBest && (
+          <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400 text-[10px] font-bold uppercase tracking-wider rounded-full mb-3">
+            <TrendingUp size={10} /> Best Option
+          </div>
+        )}
+        {!isBest && analysis.isTopRecommendation && (
+          <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-gray-300 text-[10px] font-semibold uppercase tracking-wider rounded-full mb-3">
+            Top Pick
+          </div>
+        )}
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-3">
+            <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${
+              isBest
+                ? "bg-green-100 dark:bg-green-900/40 text-green-600"
+                : isMuted
+                ? "bg-gray-50 dark:bg-slate-700/50 text-gray-400"
+                : "bg-gray-100 dark:bg-slate-700 text-gray-500 dark:text-gray-400"
+            }`}>
+              {strategyIcons[analysis.strategy]}
+            </div>
+            <div>
+              <h3 className={`font-bold ${isMuted ? "text-gray-700 dark:text-gray-300" : "text-gray-900 dark:text-white"}`}>
+                {STRATEGIES[analysis.strategy].label}
+              </h3>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {STRATEGIES[analysis.strategy].tagline}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-col items-end gap-1">
+            {feasibilityBadge(analysis.feasibility)}
+            {confidenceChip(analysis.confidence, analysis.confidenceLabel)}
+          </div>
+        </div>
+
+        {analysis.caveats && analysis.caveats.length > 0 && (
+          <div className="mt-3 space-y-1.5">
+            {analysis.caveats.slice(0, 3).map((c, i) => (
+              <div
+                key={i}
+                className={`flex items-start gap-2 text-[11px] leading-relaxed border rounded-lg px-2.5 py-1.5 ${caveatTone(c.severity)}`}
+              >
+                {caveatIcon(c.severity)}
+                <span>{c.text}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="grid grid-cols-3 gap-3 mt-4">
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Profit</p>
+            <p className={`text-lg font-bold ${analysis.profit > 0 ? "text-green-600" : "text-red-500"}`}>
+              {formatCurrency(analysis.profit)}
+            </p>
+          </div>
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">ROI</p>
+            <p className={`text-lg font-bold ${analysis.roi > 15 ? "text-green-600" : analysis.roi > 0 ? "text-amber-600" : "text-red-500"}`}>
+              {formatPercent(analysis.roi)}
+            </p>
+          </div>
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Timeline</p>
+            <p className="text-lg font-bold text-gray-900 dark:text-white">
+              {analysis.timelineMonths}mo
+            </p>
+          </div>
+        </div>
+
+        {/* Per-strategy overrides — local-state inputs, commit on blur/Enter */}
+        <div className="mt-4 p-3 bg-gray-50 dark:bg-slate-700/50 rounded-xl space-y-2">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <div className="flex items-center gap-1.5">
+              <label className="text-[10px] uppercase tracking-wider text-gray-400 font-medium whitespace-nowrap">Build</label>
+              <input
+                type="number"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={localBuildSqft}
+                onChange={(e) => setLocalBuildSqft(e.target.value)}
+                onBlur={commitBuild}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.currentTarget.blur();
+                  }
+                }}
+                className="w-20 px-2 py-1 text-xs bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white text-right"
+              />
+              <span className="text-[10px] text-gray-400">sqft</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-[10px] uppercase tracking-wider text-gray-400 font-medium whitespace-nowrap">Sell</label>
+              <span className="text-[10px] text-gray-400">$</span>
+              <input
+                type="number"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={localSellPpsf}
+                onChange={(e) => setLocalSellPpsf(e.target.value)}
+                onBlur={commitSell}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.currentTarget.blur();
+                  }
+                }}
+                className="w-20 px-2 py-1 text-xs bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white text-right"
+              />
+              <span className="text-[10px] text-gray-400">/sqft</span>
+              <a
+                href={redfinUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-0.5 text-[10px] text-blue-500 hover:text-blue-700 underline whitespace-nowrap"
+              >
+                Redfin <ExternalLink size={9} />
+              </a>
+            </div>
+            {(override?.buildSqft || override?.sellPricePerSqft) && (
+              <button
+                onClick={() => {
+                  onResetOverride();
+                  setLocalBuildSqft(String(analysis.buildSqft));
+                  setLocalSellPpsf(String(defaultSellPpsf));
+                }}
+                className="text-[10px] text-gray-400 hover:text-red-500 underline ml-auto"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          <p className="text-[10px] text-gray-400 dark:text-gray-500 leading-snug">
+            Default sell price: <span className="font-medium text-gray-600 dark:text-gray-400">${defaultSellPpsf}/sqft</span>{" "}
+            <span className={defaultSellSource === "neighborhood" ? "text-emerald-600" : "text-amber-600"}>
+              ({defaultSellHint})
+            </span>
+          </p>
+        </div>
+
+        {/* Timeline bar */}
+        <div className="mt-4">
+          <div className="flex h-2 rounded-full overflow-hidden bg-gray-100 dark:bg-slate-700">
+            <div
+              className="bg-amber-400 rounded-l-full"
+              style={{ width: `${(analysis.permitMonths / Math.max(1, analysis.timelineMonths)) * 100}%` }}
+              title={`Permit: ${analysis.permitMonths}mo`}
+            />
+            <div
+              className="bg-blue-400"
+              style={{ width: `${(analysis.buildMonths / Math.max(1, analysis.timelineMonths)) * 100}%` }}
+              title={`Build: ${analysis.buildMonths}mo`}
+            />
+            <div
+              className="bg-green-400 rounded-r-full"
+              style={{ width: `${(analysis.sellMonths / Math.max(1, analysis.timelineMonths)) * 100}%` }}
+              title={`Sell: ${analysis.sellMonths}mo`}
+            />
+          </div>
+          <div className="flex justify-between mt-1 text-[10px] text-gray-400">
+            <span>Permit ({analysis.permitMonths}mo)</span>
+            <span>Build ({analysis.buildMonths}mo)</span>
+            <span>Sell ({analysis.sellMonths}mo)</span>
+          </div>
+        </div>
+
+        <button
+          onClick={onToggleExpanded}
+          className="flex items-center gap-1 mt-4 text-xs font-medium text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+        >
+          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          {expanded ? "Less detail" : "Full breakdown"}
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="px-5 pb-5 border-t border-gray-100 dark:border-slate-700 pt-4">
+          <div className="space-y-3 text-sm">
+            <div className="flex justify-between">
+              <span className="text-gray-500">Build Area</span>
+              <span className="font-medium text-gray-900 dark:text-white">{analysis.buildSqft.toLocaleString()} sqft</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Acquisition</span>
+              <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.acquisitionCost)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Construction</span>
+              <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.constructionCost)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Holding ({analysis.timelineMonths}mo × {formatCurrency(analysis.holdingCostMonthly)}/mo)</span>
+              <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.totalHoldingCost)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Selling Costs</span>
+              <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.sellingCosts)}</span>
+            </div>
+            <div className="border-t border-gray-100 dark:border-slate-700 pt-2 flex justify-between font-bold">
+              <span className="text-gray-700 dark:text-gray-300">Total Project Cost</span>
+              <span className="text-gray-900 dark:text-white">{formatCurrency(analysis.totalProjectCost)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Expected Sale Price</span>
+              <span className="font-bold text-green-600">{formatCurrency(analysis.expectedSalePrice)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Annualized ROI</span>
+              <span className="font-bold text-gray-900 dark:text-white">{formatPercent(analysis.annualizedRoi)}</span>
+            </div>
+            <div className="mt-3 p-3 bg-gray-50 dark:bg-slate-700 rounded-xl">
+              <p className="text-xs text-gray-600 dark:text-gray-300">{analysis.recommendation}</p>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PropertyAnalysis() {
   const router = useRouter();
   const property = useStore((s) => s.currentProperty);
@@ -149,6 +498,10 @@ export default function PropertyAnalysis() {
     loanTermYears: 30,
     points: 0,
   });
+
+  // List price override — the auto-pulled estimate is often wrong; let user edit.
+  // `undefined` means "use property.listingPrice"; a number means "use this instead".
+  const [listPriceOverride, setListPriceOverride] = useState<number | undefined>(undefined);
 
   // Per-strategy overrides for build sqft and sell price/sqft
   const [strategyOverrides, setStrategyOverrides] = useState<
@@ -180,15 +533,23 @@ export default function PropertyAnalysis() {
     setCostPerSqft(settings.customCostPerSqft[tier]);
   };
 
-  // Run analysis
-  const { analyses, additional, recommended } = useMemo(() => {
-    if (!property) {
-      return { analyses: [], additional: [], recommended: "pass" as Strategy };
+  // Effective property = stored property with optional list-price override applied.
+  const effectiveProperty: PropertyData | null = useMemo(() => {
+    if (!property) return null;
+    if (listPriceOverride === undefined || listPriceOverride === property.listingPrice) {
+      return property;
     }
-    return analyzeAllStrategies(property, qualityTier, costPerSqft, financing, strategyOverrides);
-  }, [property, qualityTier, costPerSqft, financing, strategyOverrides]);
+    return { ...property, listingPrice: listPriceOverride };
+  }, [property, listPriceOverride]);
 
-  const [showMoreStrategies, setShowMoreStrategies] = useState(false);
+  // Run analysis
+  const { analyses, recommended } = useMemo(() => {
+    if (!effectiveProperty) {
+      return { analyses: [], recommended: "pass" as Strategy };
+    }
+    return analyzeAllStrategies(effectiveProperty, qualityTier, costPerSqft, financing, strategyOverrides);
+  }, [effectiveProperty, qualityTier, costPerSqft, financing, strategyOverrides]);
+
   const [showComps, setShowComps] = useState(true);
 
   // Save to store
@@ -267,10 +628,20 @@ export default function PropertyAnalysis() {
           </button>
         </div>
 
-        {/* Property Stats Bar */}
+        {/* Property Stats Bar — list price is editable */}
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+          {/* Editable list price */}
+          <div className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-xl p-3">
+            <p className="text-xs text-gray-500 dark:text-gray-400">List Price</p>
+            <ListPriceInput
+              defaultValue={listPriceOverride ?? property.listingPrice}
+              originalValue={property.listingPrice}
+              onCommit={(v) => setListPriceOverride(v === property.listingPrice ? undefined : v)}
+              hasOverride={listPriceOverride !== undefined && listPriceOverride !== property.listingPrice}
+              onReset={() => setListPriceOverride(undefined)}
+            />
+          </div>
           {[
-            { label: "List Price", value: formatCurrency(property.listingPrice) },
             { label: "Lot Size", value: `${property.lotSizeSqft.toLocaleString()} sqft` },
             { label: "Zoning", value: property.zoningCode },
             { label: "Current", value: `${property.beds}bd/${property.baths}ba · ${property.currentSqft.toLocaleString()} sqft` },
@@ -472,273 +843,47 @@ export default function PropertyAnalysis() {
           </div>
         </div>
 
-        {/* Strategy Cards */}
+        {/* Strategy Cards — all four in fixed enum order, all editable.
+            Top-2 by current score get visual emphasis; "Best Option" badge on rank-1. */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
           {analyses.map((analysis) => {
-            const isRecommended = analysis.strategy === recommended;
-            const isExpanded = expandedStrategy === analysis.strategy;
+            const isBest = analysis.strategy === recommended && analysis.profit > 0;
+            const sellInfo = effectiveProperty
+              ? getDefaultSellPricePerSqft(effectiveProperty, qualityTier)
+              : { value: 425, source: "wa_fallback" as const, tierMultiplier: 1, neighborhoodMedianPpsf: undefined, compCount: undefined };
+            const sellHint =
+              sellInfo.source === "neighborhood"
+                ? `median ${sellInfo.compCount} comps @ $${sellInfo.neighborhoodMedianPpsf}/sqft × ${sellInfo.tierMultiplier.toFixed(2)}x ${qualityTier.replace("_", "-")}`
+                : `WA fallback — no nearby comps with sqft`;
 
             return (
-              <div
-                key={analysis.strategy}
-                className={`bg-white dark:bg-slate-800 border-2 rounded-2xl overflow-hidden transition-all ${
-                  isRecommended
-                    ? "border-green-500 shadow-lg shadow-green-500/10"
-                    : "border-gray-100 dark:border-slate-700"
-                }`}
-              >
-                {/* Card Header */}
-                <div className="p-5">
-                  {isRecommended && (
-                    <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400 text-[10px] font-bold uppercase tracking-wider rounded-full mb-3">
-                      <TrendingUp size={10} /> Best Option
-                    </div>
-                  )}
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${
-                        isRecommended
-                          ? "bg-green-100 dark:bg-green-900/40 text-green-600"
-                          : "bg-gray-100 dark:bg-slate-700 text-gray-500 dark:text-gray-400"
-                      }`}>
-                        {strategyIcons[analysis.strategy]}
-                      </div>
-                      <div>
-                        <h3 className="font-bold text-gray-900 dark:text-white">
-                          {STRATEGIES[analysis.strategy].label}
-                        </h3>
-                        <p className="text-xs text-gray-500 dark:text-gray-400">
-                          {STRATEGIES[analysis.strategy].tagline}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex flex-col items-end gap-1">
-                      {feasibilityBadge(analysis.feasibility)}
-                      {confidenceChip(analysis.confidence, analysis.confidenceLabel)}
-                    </div>
-                  </div>
-
-                  {/* Caveats (typology + size guardrails) */}
-                  {analysis.caveats && analysis.caveats.length > 0 && (
-                    <div className="mt-3 space-y-1.5">
-                      {analysis.caveats.slice(0, 3).map((c, i) => (
-                        <div
-                          key={i}
-                          className={`flex items-start gap-2 text-[11px] leading-relaxed border rounded-lg px-2.5 py-1.5 ${caveatTone(c.severity)}`}
-                        >
-                          {caveatIcon(c.severity)}
-                          <span>{c.text}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Key metrics */}
-                  <div className="grid grid-cols-3 gap-3 mt-4">
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Profit</p>
-                      <p className={`text-lg font-bold ${analysis.profit > 0 ? "text-green-600" : "text-red-500"}`}>
-                        {formatCurrency(analysis.profit)}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">ROI</p>
-                      <p className={`text-lg font-bold ${analysis.roi > 15 ? "text-green-600" : analysis.roi > 0 ? "text-amber-600" : "text-red-500"}`}>
-                        {formatPercent(analysis.roi)}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium">Timeline</p>
-                      <p className="text-lg font-bold text-gray-900 dark:text-white">
-                        {analysis.timelineMonths}mo
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Per-strategy overrides: Build Sqft + Sell $/sqft */}
-                  <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 p-3 bg-gray-50 dark:bg-slate-700/50 rounded-xl">
-                    <div className="flex items-center gap-1.5">
-                      <label className="text-[10px] uppercase tracking-wider text-gray-400 font-medium whitespace-nowrap">Build</label>
-                      <input
-                        type="number"
-                        value={strategyOverrides[analysis.strategy]?.buildSqft ?? analysis.buildSqft}
-                        onChange={(e) => {
-                          const v = Number(e.target.value);
-                          updateOverride(analysis.strategy, "buildSqft", v > 0 ? v : undefined);
-                        }}
-                        className="w-20 px-2 py-1 text-xs bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white text-right"
-                      />
-                      <span className="text-[10px] text-gray-400">sqft</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <label className="text-[10px] uppercase tracking-wider text-gray-400 font-medium whitespace-nowrap">Sell</label>
-                      <span className="text-[10px] text-gray-400">$</span>
-                      <input
-                        type="number"
-                        value={
-                          strategyOverrides[analysis.strategy]?.sellPricePerSqft ??
-                          (analysis.buildSqft > 0 ? Math.round(analysis.expectedSalePrice / analysis.buildSqft) : DEFAULT_SELL_PRICE_PER_SQFT[qualityTier])
-                        }
-                        onChange={(e) => {
-                          const v = Number(e.target.value);
-                          updateOverride(analysis.strategy, "sellPricePerSqft", v > 0 ? v : undefined);
-                        }}
-                        className="w-20 px-2 py-1 text-xs bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white text-right"
-                      />
-                      <span className="text-[10px] text-gray-400">/sqft</span>
-                      <a
-                        href={getRedfin()}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-0.5 text-[10px] text-blue-500 hover:text-blue-700 underline whitespace-nowrap"
-                      >
-                        View comps <ExternalLink size={9} />
-                      </a>
-                    </div>
-                    {(strategyOverrides[analysis.strategy]?.buildSqft || strategyOverrides[analysis.strategy]?.sellPricePerSqft) && (
-                      <button
-                        onClick={() => setStrategyOverrides((prev) => {
-                          const next = { ...prev };
-                          delete next[analysis.strategy];
-                          return next;
-                        })}
-                        className="text-[10px] text-gray-400 hover:text-red-500 underline ml-auto"
-                      >
-                        Reset
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Timeline bar */}
-                  <div className="mt-4">
-                    <div className="flex h-2 rounded-full overflow-hidden bg-gray-100 dark:bg-slate-700">
-                      <div
-                        className="bg-amber-400 rounded-l-full"
-                        style={{ width: `${(analysis.permitMonths / analysis.timelineMonths) * 100}%` }}
-                        title={`Permit: ${analysis.permitMonths}mo`}
-                      />
-                      <div
-                        className="bg-blue-400"
-                        style={{ width: `${(analysis.buildMonths / analysis.timelineMonths) * 100}%` }}
-                        title={`Build: ${analysis.buildMonths}mo`}
-                      />
-                      <div
-                        className="bg-green-400 rounded-r-full"
-                        style={{ width: `${(analysis.sellMonths / analysis.timelineMonths) * 100}%` }}
-                        title={`Sell: ${analysis.sellMonths}mo`}
-                      />
-                    </div>
-                    <div className="flex justify-between mt-1 text-[10px] text-gray-400">
-                      <span>Permit ({analysis.permitMonths}mo)</span>
-                      <span>Build ({analysis.buildMonths}mo)</span>
-                      <span>Sell ({analysis.sellMonths}mo)</span>
-                    </div>
-                  </div>
-
-                  {/* Expand toggle */}
-                  <button
-                    onClick={() => setExpandedStrategy(isExpanded ? null : analysis.strategy)}
-                    className="flex items-center gap-1 mt-4 text-xs font-medium text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                  >
-                    {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                    {isExpanded ? "Less detail" : "Full breakdown"}
-                  </button>
-                </div>
-
-                {/* Expanded detail */}
-                {isExpanded && (
-                  <div className="px-5 pb-5 border-t border-gray-100 dark:border-slate-700 pt-4">
-                    <div className="space-y-3 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Build Area</span>
-                        <span className="font-medium text-gray-900 dark:text-white">{analysis.buildSqft.toLocaleString()} sqft</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Acquisition</span>
-                        <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.acquisitionCost)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Construction</span>
-                        <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.constructionCost)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Holding ({analysis.timelineMonths}mo × {formatCurrency(analysis.holdingCostMonthly)}/mo)</span>
-                        <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.totalHoldingCost)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Selling Costs</span>
-                        <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.sellingCosts)}</span>
-                      </div>
-                      <div className="border-t border-gray-100 dark:border-slate-700 pt-2 flex justify-between font-bold">
-                        <span className="text-gray-700 dark:text-gray-300">Total Project Cost</span>
-                        <span className="text-gray-900 dark:text-white">{formatCurrency(analysis.totalProjectCost)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Expected Sale Price</span>
-                        <span className="font-bold text-green-600">{formatCurrency(analysis.expectedSalePrice)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Annualized ROI</span>
-                        <span className="font-bold text-gray-900 dark:text-white">{formatPercent(analysis.annualizedRoi)}</span>
-                      </div>
-                      <div className="mt-3 p-3 bg-gray-50 dark:bg-slate-700 rounded-xl">
-                        <p className="text-xs text-gray-600 dark:text-gray-300">{analysis.recommendation}</p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
+              <StrategyCard
+                key={`${analysis.strategy}-${qualityTier}`}
+                analysis={analysis}
+                isBest={isBest}
+                override={strategyOverrides[analysis.strategy]}
+                onCommitOverride={(field, v) => updateOverride(analysis.strategy, field, v)}
+                onResetOverride={() =>
+                  setStrategyOverrides((prev) => {
+                    const next = { ...prev };
+                    delete next[analysis.strategy];
+                    return next;
+                  })
+                }
+                defaultSellPpsf={sellInfo.value}
+                defaultSellSource={sellInfo.source}
+                defaultSellHint={sellHint}
+                expanded={expandedStrategy === analysis.strategy}
+                onToggleExpanded={() =>
+                  setExpandedStrategy(
+                    expandedStrategy === analysis.strategy ? null : analysis.strategy
+                  )
+                }
+                redfinUrl={getRedfin()}
+              />
             );
           })}
         </div>
-
-        {/* Additional strategies (top-2 visible above; rest collapsed here) */}
-        {additional.length > 0 && (
-          <div className="mb-6">
-            <button
-              onClick={() => setShowMoreStrategies(!showMoreStrategies)}
-              className="flex items-center gap-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
-            >
-              {showMoreStrategies ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              {showMoreStrategies ? "Hide" : "Show"} other strategies ({additional.length})
-            </button>
-            {showMoreStrategies && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-                {additional.map((a) => (
-                  <div
-                    key={a.strategy}
-                    className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-xl p-4 opacity-90"
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className="w-8 h-8 rounded-lg bg-gray-100 dark:bg-slate-700 text-gray-500 flex items-center justify-center">
-                          {strategyIcons[a.strategy]}
-                        </div>
-                        <div>
-                          <p className="text-sm font-semibold text-gray-900 dark:text-white">
-                            {STRATEGIES[a.strategy].label}
-                          </p>
-                          <p className="text-[11px] text-gray-500">
-                            {formatCurrency(a.profit)} · {formatPercent(a.roi)} ROI · {a.timelineMonths}mo
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex flex-col items-end gap-1">
-                        {feasibilityBadge(a.feasibility)}
-                        {confidenceChip(a.confidence, a.confidenceLabel)}
-                      </div>
-                    </div>
-                    {a.caveats && a.caveats.length > 0 && (
-                      <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400 italic">
-                        {a.caveats[0].text}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
 
         {/* Bottom recommendation banner */}
         {recommended !== "pass" && (

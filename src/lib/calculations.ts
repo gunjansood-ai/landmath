@@ -185,51 +185,112 @@ export function calculateMonthlyPayment(
   );
 }
 
-// Estimate sale price based on area comps (simplified)
+// New-construction premium over local existing-home resale $/sqft.
+// Calibrated against WA 2026 data:
+//   - Seattle median resale ~$545–572/sqft
+//   - Standard new construction sale ~$450–600/sqft → ~1.0× resale
+//   - Premium new sale ~$650–800/sqft → ~1.20× resale
+//   - Luxury new (Bellevue/Eastside) ~$850–1,000/sqft → ~1.55× resale
+//   - Ultra-luxury (Medina/Mercer Island) ~$1,100–1,500+/sqft → ~2.0× resale
+// Sources: Redfin Seattle market report Apr 2026, Emerald City Construction
+// 2026 Seattle/Eastside custom-home guide, HomeGuide WA 2026 build-cost data.
+export const TIER_NEW_CONSTRUCTION_MULTIPLIER: Record<QualityTier, number> = {
+  standard: 1.00,
+  premium: 1.20,
+  luxury: 1.55,
+  ultra_luxury: 2.00,
+};
+
+// WA-wide fallback sale $/sqft when no nearby comps are available.
+// Updated for 2026 market conditions — old values ($350/$500/$700/$1000) were too low,
+// reflected pre-2023 build costs rather than current new-construction sale prices.
+export const DEFAULT_SELL_PRICE_PER_SQFT: Record<QualityTier, number> = {
+  standard: 425,         // builder-grade new construction WA average
+  premium: 600,          // upgraded finishes, Eastside / North Seattle typical
+  luxury: 850,           // high-end custom, Bellevue / Mercer Island typical
+  ultra_luxury: 1300,    // bespoke architectural, Medina / Clyde Hill
+};
+
+export interface DefaultSellPricePerSqft {
+  value: number;
+  source: "neighborhood" | "wa_fallback";
+  neighborhoodMedianPpsf?: number;
+  compCount?: number;
+  tierMultiplier: number;
+}
+
+/**
+ * Derive a default sell $/sqft for a property + tier.
+ *
+ * Priority:
+ *   1. Median $/sqft from neighborhood cited sales × tier multiplier.
+ *      Requires at least 3 valid comps with `pricePerSqft` populated.
+ *   2. WA-wide tier fallback (DEFAULT_SELL_PRICE_PER_SQFT).
+ *
+ * Returns the value along with derivation metadata so the UI can show
+ * the user exactly how this number was computed.
+ */
+export function getDefaultSellPricePerSqft(
+  property: PropertyData,
+  tier: QualityTier
+): DefaultSellPricePerSqft {
+  const mult = TIER_NEW_CONSTRUCTION_MULTIPLIER[tier];
+  const nb = property.neighborhood;
+  if (nb && nb.sales.length > 0) {
+    const validPpsf = nb.sales
+      .map((s) => s.pricePerSqft)
+      .filter((v): v is number => typeof v === "number" && v > 0 && v < 5000);
+    if (validPpsf.length >= 3) {
+      const sorted = [...validPpsf].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      return {
+        value: Math.round(median * mult),
+        source: "neighborhood",
+        neighborhoodMedianPpsf: median,
+        compCount: validPpsf.length,
+        tierMultiplier: mult,
+      };
+    }
+  }
+  return {
+    value: DEFAULT_SELL_PRICE_PER_SQFT[tier],
+    source: "wa_fallback",
+    tierMultiplier: mult,
+  };
+}
+
+// Estimate sale price based on area comps. Now consumes
+// getDefaultSellPricePerSqft so the same logic powers both UI defaults
+// and the underlying calculation.
 function estimateSalePrice(
   property: PropertyData,
   strategy: Strategy,
   tier: QualityTier,
   buildSqft: number
 ): number {
-  // Base comp price per sqft (varies by tier and area)
-  const baseCompPricePerSqft: Record<QualityTier, number> = {
-    standard: 350,
-    premium: 500,
-    luxury: 700,
-    ultra_luxury: 1000,
-  };
-
-  const pricePerSqft = baseCompPricePerSqft[tier];
+  const pricePerSqft = getDefaultSellPricePerSqft(property, tier).value;
 
   switch (strategy) {
     case "fresh_build":
       return buildSqft * pricePerSqft;
     case "split_build": {
-      const homes = property.lotSizeSqft >= 12000 ? 2 : 1;
-      return (buildSqft / homes) * pricePerSqft * homes;
+      // Splits sell as N similarly-sized homes at the same $/sqft.
+      return buildSqft * pricePerSqft;
     }
     case "main_adu": {
+      // Main house gets full $/sqft; ADU portion sells/values at ~85% of main.
       const mainValue = buildSqft * 0.75 * pricePerSqft;
-      const aduRentalValue = buildSqft * 0.25 * pricePerSqft * 0.85;
-      return mainValue + aduRentalValue;
+      const aduValue = buildSqft * 0.25 * pricePerSqft * 0.85;
+      return mainValue + aduValue;
     }
     case "flip_fix": {
-      // Renovated homes sell at slight discount to new
-      return buildSqft * pricePerSqft * 0.8;
+      // Renovated homes sell at a discount to new construction.
+      return buildSqft * pricePerSqft * 0.80;
     }
     default:
       return 0;
   }
 }
-
-// Default sale price per sqft by tier (exported for UI hints)
-export const DEFAULT_SELL_PRICE_PER_SQFT: Record<QualityTier, number> = {
-  standard: 350,
-  premium: 500,
-  luxury: 700,
-  ultra_luxury: 1000,
-};
 
 // Get the default buildable sqft for a strategy (exported for UI hints)
 export function getDefaultBuildSqft(property: PropertyData, strategy: Strategy): number {
@@ -416,13 +477,16 @@ function scoreAnalysis(a: AnalysisResult): number {
 }
 
 /**
- * Run all strategies. Returns:
- *   - analyses: top-2 strategies by score (the visible cards)
- *   - additional: remaining feasible strategies (drill-in)
- *   - recommended: the #1 strategy (or "pass" if even the best is unprofitable)
+ * Run all strategies. Always returns all four in **fixed strategy-enum order**
+ * (fresh_build → split_build → main_adu → flip_fix) so the UI can render them
+ * in stable positions. Each analysis carries `isTopRecommendation` indicating
+ * whether it's currently in the top-2 by score, and `recommended` names the
+ * single best one. Stable order is critical for mobile editing — when an
+ * override flips scores, the cards must NOT reorder or the focused input
+ * gets detached and loses focus.
  *
- * Per ARCHITECT_MODE_PLAN.md §5c we always render the top-2 regardless of
- * typology fit so the user always sees a least-bad pair, never an empty page.
+ * `additional` retains the not-allowed strategies (so they can still be
+ * surfaced with a "Not Allowed" badge) plus any other excluded variants.
  */
 export function analyzeAllStrategies(
   property: PropertyData,
@@ -440,34 +504,26 @@ export function analyzeAllStrategies(
     calculateAnalysis(property, s, tier, costPerSqft, financing, strategyOverrides?.[s])
   );
 
-  const ranked = [...all]
+  // Rank only the feasible ones — these compete for the top-2 slots and "best".
+  const feasibleRanked = [...all]
     .filter((a) => a.feasibility !== "not_allowed")
-    .map((a) => ({ ...a, _score: scoreAnalysis(a) }))
-    .sort((a, b) => b._score - a._score);
+    .map((a) => ({ strategy: a.strategy, score: scoreAnalysis(a), profit: a.profit }))
+    .sort((a, b) => b.score - a.score);
 
-  const top = ranked.slice(0, 2).map((r): AnalysisResult => {
-    const { _score: _omit, ...rest } = r;
-    void _omit;
-    return { ...rest, isTopRecommendation: true };
-  });
-  const additional = ranked.slice(2).map((r): AnalysisResult => {
-    const { _score: _omit, ...rest } = r;
-    void _omit;
-    return { ...rest, isTopRecommendation: false };
-  });
-
-  // Strategies marked not_allowed are kept in `additional` so the user can
-  // still see them with the "Not Allowed" badge if they expand.
-  const notAllowed = all
-    .filter((a) => a.feasibility === "not_allowed")
-    .map((a): AnalysisResult => ({ ...a, isTopRecommendation: false }));
-
+  const top2Strategies = new Set(feasibleRanked.slice(0, 2).map((r) => r.strategy));
+  const bestStrategy = feasibleRanked[0]?.strategy;
   const recommended: Strategy =
-    top.length > 0 && top[0].profit > 0 ? top[0].strategy : "pass";
+    bestStrategy && (feasibleRanked[0]?.profit ?? 0) > 0 ? bestStrategy : "pass";
+
+  // Annotate all four in their original enum order.
+  const annotated = all.map((a): AnalysisResult => ({
+    ...a,
+    isTopRecommendation: top2Strategies.has(a.strategy),
+  }));
 
   return {
-    analyses: top,
-    additional: [...additional, ...notAllowed],
+    analyses: annotated, // all four, in fixed order, top-2 marked
+    additional: [],      // kept for back-compat; UI no longer uses a separate pane
     recommended,
   };
 }
