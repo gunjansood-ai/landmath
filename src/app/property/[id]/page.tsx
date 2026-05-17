@@ -52,6 +52,7 @@ import {
   StrategyOverrides,
   calculateTownhomeAnalysis,
   calculateMultiFamilyAnalysis,
+  getMarketRentDefaults,
 } from "@/lib/calculations";
 import type { TypologyBucket } from "@/lib/buildability";
 
@@ -595,7 +596,7 @@ function MultiFamilyDetail({
   isBest: boolean;
   rentCompsLoading: boolean;
   onFetchRentComps: () => void;
-  rentCompsSource: "apillow" | "manual" | null;
+  rentCompsSource: "apillow" | "zip" | "national" | null;
 }) {
   const totalUnits = inputs.studioCount + inputs.oneBrCount + inputs.twoBrCount;
   const isRent = inputs.exitType === "rent";
@@ -698,9 +699,15 @@ function MultiFamilyDetail({
             <div className="flex items-center justify-between mb-2">
               <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Step 3 — Monthly Rents</p>
               <div className="flex items-center gap-2">
-                {rentCompsSource === "apillow" && (
-                  <span className="text-[9px] font-bold text-blue-600 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded-full">
-                    From APIllow
+                {rentCompsSource && (
+                  <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${
+                    rentCompsSource === "apillow"
+                      ? "text-blue-600 bg-blue-50 dark:bg-blue-900/30"
+                      : rentCompsSource === "zip"
+                      ? "text-emerald-600 bg-emerald-50 dark:bg-emerald-900/30"
+                      : "text-gray-500 bg-gray-100 dark:bg-slate-700"
+                  }`}>
+                    {rentCompsSource === "apillow" ? "Live · APIllow" : rentCompsSource === "zip" ? "ZIP estimate" : "National avg"}
                   </span>
                 )}
                 <button
@@ -825,11 +832,18 @@ export default function PropertyAnalysis() {
   const [aiNarrative, setAiNarrative] = useState<string>("");
   const [showComps, setShowComps] = useState(false);
 
-  // New strategy inputs
+  // New strategy inputs — seed MF rents from ZIP table immediately so the form
+  // is never blank, then override with APIllow data when it loads.
   const [townhomeInputs, setTownhomeInputs] = useState<TownhomeInputs>(DEFAULT_TOWNHOME_INPUTS);
-  const [mfInputs, setMfInputs] = useState<MultiFamilyInputs>(DEFAULT_MF_INPUTS);
+  const [mfInputs, setMfInputs] = useState<MultiFamilyInputs>(() => {
+    const rentDefaults = getMarketRentDefaults(property?.zip);
+    return { ...DEFAULT_MF_INPUTS, ...rentDefaults };
+  });
   const [rentCompsLoading, setRentCompsLoading] = useState(false);
-  const [rentCompsSource, setRentCompsSource] = useState<"apillow" | "manual" | null>(null);
+  const [rentCompsSource, setRentCompsSource] = useState<"apillow" | "zip" | "national" | null>(() => {
+    const d = getMarketRentDefaults(property?.zip);
+    return d.source; // "zip" or "national" — shown immediately, upgraded to "apillow" if fetch succeeds
+  });
 
   // Active strategy (which pill is focused)
   const [activeStrategy, setActiveStrategy] = useState<Strategy>("fresh_build");
@@ -910,7 +924,7 @@ export default function PropertyAnalysis() {
           ...(data.oneBrRent ? { oneBrRent: data.oneBrRent } : {}),
           ...(data.twoBrRent ? { twoBrRent: data.twoBrRent } : {}),
         }));
-        setRentCompsSource(data.source === "apillow" ? "apillow" : "manual");
+        setRentCompsSource("apillow");
       }
     } catch {
       // silently fail — user can enter manually
@@ -919,12 +933,7 @@ export default function PropertyAnalysis() {
     }
   }, [effectiveProperty]);
 
-  // Auto-fetch rent comps when multi-family tab is first selected
-  useEffect(() => {
-    if (activeStrategy === "multifamily" && rentCompsSource === null) {
-      fetchRentComps();
-    }
-  }, [activeStrategy, rentCompsSource, fetchRentComps]);
+  // Rent comps are pre-seeded from ZIP table; user refreshes manually via APIllow button.
 
   const updateOverride = (strategy: Strategy, field: keyof StrategyOverrides, value: number | undefined) => {
     setStrategyOverrides((prev) => ({ ...prev, [strategy]: { ...prev[strategy], [field]: value } }));

@@ -43,15 +43,16 @@ export interface MultiFamilyInputs {
   salePricePerUnit: number;     // for sell exit
 }
 
+// National baseline — overridden by ZIP lookup or APIllow when available
 export const DEFAULT_MF_INPUTS: MultiFamilyInputs = {
   exitType: "rent",
   studioCount: 2,
   oneBrCount: 4,
   twoBrCount: 2,
   avgUnitSqft: 800,
-  studioRent: 0,
-  oneBrRent: 0,
-  twoBrRent: 0,
+  studioRent: 1400,
+  oneBrRent: 1800,
+  twoBrRent: 2300,
   vacancyRate: 0.05,
   operatingExpenseRatio: 0.35,
   condoConversionCost: 8000,
