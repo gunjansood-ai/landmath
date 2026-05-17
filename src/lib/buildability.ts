@@ -39,6 +39,8 @@ export interface Comp {
   principalUse: string;    // raw PREUSE_DESC for transparency
   typology: TypologyBucket;
   sqftLiving?: number;     // populated when assessor lookup succeeds
+  yearBuilt?: number;      // populated when assessor lookup succeeds
+  isNewConstructionAtSale?: boolean; // true when yearBuilt ≥ saleYear - 5
   lotSizeSqft?: number;
   distanceM?: number;      // distance from subject parcel
   pricePerSqft?: number;

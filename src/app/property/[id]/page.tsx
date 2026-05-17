@@ -849,12 +849,27 @@ export default function PropertyAnalysis() {
           {analyses.map((analysis) => {
             const isBest = analysis.strategy === recommended && analysis.profit > 0;
             const sellInfo = effectiveProperty
-              ? getDefaultSellPricePerSqft(effectiveProperty, qualityTier)
-              : { value: 425, source: "wa_fallback" as const, tierMultiplier: 1, neighborhoodMedianPpsf: undefined, compCount: undefined };
+              ? getDefaultSellPricePerSqft(effectiveProperty, qualityTier, analysis.strategy)
+              : {
+                  value: 425,
+                  source: "wa_fallback" as const,
+                  multiplier: 1,
+                  neighborhoodMedianPpsf: undefined,
+                  compCount: undefined,
+                  strategy: analysis.strategy,
+                };
+            const sourceLabel: Record<typeof sellInfo.source, string> = {
+              neighborhood_new: "new-construction comps",
+              neighborhood_resale: "existing-home resale comps",
+              neighborhood_all: "all nearby comps",
+              wa_fallback: "WA fallback — no usable comps",
+            };
             const sellHint =
-              sellInfo.source === "neighborhood"
-                ? `median ${sellInfo.compCount} comps @ $${sellInfo.neighborhoodMedianPpsf}/sqft × ${sellInfo.tierMultiplier.toFixed(2)}x ${qualityTier.replace("_", "-")}`
-                : `WA fallback — no nearby comps with sqft`;
+              sellInfo.source === "wa_fallback"
+                ? sourceLabel[sellInfo.source]
+                : `${sellInfo.compCount} ${sourceLabel[sellInfo.source]} @ $${sellInfo.neighborhoodMedianPpsf}/sqft median × ${sellInfo.multiplier.toFixed(2)}× ${qualityTier.replace("_", "-")}`;
+            const sellSource: "neighborhood" | "wa_fallback" =
+              sellInfo.source === "wa_fallback" ? "wa_fallback" : "neighborhood";
 
             return (
               <StrategyCard
@@ -871,7 +886,7 @@ export default function PropertyAnalysis() {
                   })
                 }
                 defaultSellPpsf={sellInfo.value}
-                defaultSellSource={sellInfo.source}
+                defaultSellSource={sellSource}
                 defaultSellHint={sellHint}
                 expanded={expandedStrategy === analysis.strategy}
                 onToggleExpanded={() =>

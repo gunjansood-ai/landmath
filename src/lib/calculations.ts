@@ -78,7 +78,60 @@ export const STRATEGIES: Record<
   },
 };
 
-// Zoning feasibility check (simplified for MVP)
+/**
+ * Estimate the district minimum lot size from a zoning code string.
+ * Stopgap until the full zoning KB (Vercel Blob) is wired up.
+ *
+ * Handles common WA patterns:
+ *   - SF-5000, SF-7200 → numeric is the min lot in sqft
+ *   - R-5, R-7.2, RS-5 → numeric is units-per-acre OR min lot in 1000s of sqft
+ *   - R-1, R-2, R-3 → dwelling-units-per-acre (smaller number = larger lot)
+ *   - R-4 (Bellevue) → ~10,800 sqft (4 units/acre)
+ *   - NR-1 / RA-2.5 / RA-5 (King County rural) → 1, 2.5, 5 acres respectively
+ *   - Returns null when the code is unrecognized.
+ */
+export function estimateDistrictMinLotSqft(zoningCode: string | null | undefined): number | null {
+  if (!zoningCode || /^unknown$/i.test(zoningCode)) return null;
+  const upper = zoningCode.toUpperCase();
+
+  // Rural-area pattern: RA-X means X-acre minimum
+  const ra = upper.match(/^RA[- ]?(\d+(?:\.\d+)?)/);
+  if (ra) return Math.round(parseFloat(ra[1]) * 43560);
+
+  // Rural NR-1 etc — common in unincorporated KC
+  const nr = upper.match(/^NR[- ]?(\d+(?:\.\d+)?)/);
+  if (nr) return Math.round(parseFloat(nr[1]) * 43560);
+
+  // SF-NNNN, RS-NNNN — number is sqft
+  const sfNumeric = upper.match(/(?:SF|RS|R)[- ]?(\d{3,5})(?:[^\d]|$)/);
+  if (sfNumeric) {
+    const n = parseInt(sfNumeric[1], 10);
+    if (n >= 1000) return n; // explicit sqft
+  }
+
+  // R-N with N as units-per-acre (Bellevue, Seattle low-density)
+  const rUnits = upper.match(/^R[- ]?(\d+(?:\.\d+)?)$/);
+  if (rUnits) {
+    const units = parseFloat(rUnits[1]);
+    if (units > 0 && units <= 30) {
+      // 43,560 sqft/acre ÷ units = min lot per unit
+      return Math.round(43560 / units);
+    }
+  }
+
+  // Last-resort: any embedded 4-5 digit number = explicit sqft
+  const anyNumeric = upper.match(/(\d{4,5})/);
+  if (anyNumeric) {
+    const n = parseInt(anyNumeric[1], 10);
+    if (n >= 1000 && n <= 200000) return n;
+  }
+
+  return null;
+}
+
+// Zoning feasibility check.
+// split_build is now properly conservative: must clear 2× district min PLUS a
+// 10% margin (real-world setbacks, frontage, and access easements eat lot).
 export function checkFeasibility(
   property: PropertyData,
   strategy: Strategy
@@ -87,14 +140,24 @@ export function checkFeasibility(
 
   switch (strategy) {
     case "fresh_build":
-      return "permitted"; // Almost always allowed in residential zones
-    case "split_build":
-      // Need minimum lot size for subdivision (typically 2x minimum)
-      if (lotSize >= 10000) return "permitted";
-      if (lotSize >= 7500) return "conditional";
+      return "permitted";
+    case "split_build": {
+      const districtMin = estimateDistrictMinLotSqft(property.zoningCode);
+      // Without a known district min, we can't responsibly call this permitted.
+      if (!districtMin) {
+        // Conservative: only "conditional" when lot is large enough that a split
+        // is plausible under most WA zoning (15,000+ sqft typical floor).
+        if (lotSize >= 15000) return "conditional";
+        return "not_allowed";
+      }
+      const requiredWithMargin = districtMin * 2 * 1.10; // 10% buffer for setbacks/access
+      const requiredBare = districtMin * 2;
+      if (lotSize >= requiredWithMargin) return "permitted";
+      if (lotSize >= requiredBare) return "conditional";
       return "not_allowed";
+    }
     case "main_adu":
-      // ADUs broadly permitted in WA since 2023
+      // HB 1337 (2023): WA cities must allow 2 ADUs per residential lot in UGAs.
       if (lotSize >= 5000) return "permitted";
       if (lotSize >= 4000) return "conditional";
       return "not_allowed";
@@ -185,15 +248,33 @@ export function calculateMonthlyPayment(
   );
 }
 
-// New-construction premium over local existing-home resale $/sqft.
+// ─── Sale $/sqft model ──────────────────────────────────────────────────────
+//
+// We now compute strategy-specific $/sqft from a strategy-specific comp pool:
+//
+//   fresh_build / split_build:
+//     - Comp pool = NEW CONSTRUCTION only (built ≤5 yr before sale).
+//     - Apply tier multiplier (new construction has its own price tier).
+//
+//   main_adu:
+//     - Comp pool = SFR-with-ADU comps preferred; fall back to recent SFRs.
+//     - Apply tier multiplier (but ADU portion sells at ~85%).
+//
+//   flip_fix:
+//     - Comp pool = ALL existing-home resale (the renovated unit will be
+//       priced against existing homes, not new builds).
+//     - Apply small renovation premium (1.05–1.20×) — NOT the new-construction
+//       multiplier. Buyers won't pay new-construction prices for a flip.
+//
 // Calibrated against WA 2026 data:
 //   - Seattle median resale ~$545–572/sqft
-//   - Standard new construction sale ~$450–600/sqft → ~1.0× resale
-//   - Premium new sale ~$650–800/sqft → ~1.20× resale
-//   - Luxury new (Bellevue/Eastside) ~$850–1,000/sqft → ~1.55× resale
-//   - Ultra-luxury (Medina/Mercer Island) ~$1,100–1,500+/sqft → ~2.0× resale
-// Sources: Redfin Seattle market report Apr 2026, Emerald City Construction
-// 2026 Seattle/Eastside custom-home guide, HomeGuide WA 2026 build-cost data.
+//   - New construction WA average ~$425–500/sqft cost, sells at $500–800/sqft
+//   - Bellevue/Eastside custom new $850–1000/sqft
+//   - Medina/Mercer Island ultra new $1100–1500+/sqft
+//
+// Sources: Redfin Seattle market report (Apr 2026), Emerald City Construction
+// (2026 Seattle/Eastside custom-home guide), HomeGuide (WA 2026 build-cost data).
+
 export const TIER_NEW_CONSTRUCTION_MULTIPLIER: Record<QualityTier, number> = {
   standard: 1.00,
   premium: 1.20,
@@ -201,80 +282,252 @@ export const TIER_NEW_CONSTRUCTION_MULTIPLIER: Record<QualityTier, number> = {
   ultra_luxury: 2.00,
 };
 
-// WA-wide fallback sale $/sqft when no nearby comps are available.
-// Updated for 2026 market conditions — old values ($350/$500/$700/$1000) were too low,
-// reflected pre-2023 build costs rather than current new-construction sale prices.
+// Renovation premium — what a renovated existing home sells for vs. the
+// median existing-home comp $/sqft in the area. Much smaller than new-construction
+// premiums because the buyer pool is the same (resale buyers, not new-build buyers).
+const TIER_FLIP_PREMIUM: Record<QualityTier, number> = {
+  standard: 1.05,
+  premium: 1.10,
+  luxury: 1.20,
+  ultra_luxury: 1.30,
+};
+
+// WA-wide fallback sale $/sqft for NEW CONSTRUCTION when no comps are available.
 export const DEFAULT_SELL_PRICE_PER_SQFT: Record<QualityTier, number> = {
-  standard: 425,         // builder-grade new construction WA average
-  premium: 600,          // upgraded finishes, Eastside / North Seattle typical
-  luxury: 850,           // high-end custom, Bellevue / Mercer Island typical
-  ultra_luxury: 1300,    // bespoke architectural, Medina / Clyde Hill
+  standard: 425,
+  premium: 600,
+  luxury: 850,
+  ultra_luxury: 1300,
+};
+
+// WA-wide fallback for FLIP RESALE (existing-home renovated). Lower than new build.
+const DEFAULT_FLIP_PRICE_PER_SQFT: Record<QualityTier, number> = {
+  standard: 400,
+  premium: 520,
+  luxury: 680,
+  ultra_luxury: 950,
 };
 
 export interface DefaultSellPricePerSqft {
   value: number;
-  source: "neighborhood" | "wa_fallback";
+  source: "neighborhood_new" | "neighborhood_resale" | "neighborhood_all" | "wa_fallback";
   neighborhoodMedianPpsf?: number;
   compCount?: number;
-  tierMultiplier: number;
+  multiplier: number;
+  strategy: Strategy;
 }
 
 /**
- * Derive a default sell $/sqft for a property + tier.
+ * Strategy-aware default sell $/sqft.
  *
- * Priority:
- *   1. Median $/sqft from neighborhood cited sales × tier multiplier.
- *      Requires at least 3 valid comps with `pricePerSqft` populated.
- *   2. WA-wide tier fallback (DEFAULT_SELL_PRICE_PER_SQFT).
- *
- * Returns the value along with derivation metadata so the UI can show
- * the user exactly how this number was computed.
+ * Pulls a filtered slice of nearby cited comps, takes the median $/sqft,
+ * and applies the strategy-appropriate multiplier. Falls back to all
+ * comps (with adjusted multiplier) if the strategy filter yields too few,
+ * then to WA-wide defaults if no comps are usable.
  */
 export function getDefaultSellPricePerSqft(
   property: PropertyData,
-  tier: QualityTier
+  tier: QualityTier,
+  strategy: Strategy
 ): DefaultSellPricePerSqft {
-  const mult = TIER_NEW_CONSTRUCTION_MULTIPLIER[tier];
   const nb = property.neighborhood;
-  if (nb && nb.sales.length > 0) {
-    const validPpsf = nb.sales
-      .map((s) => s.pricePerSqft)
+
+  // Helper: pull median $/sqft from a comp subset.
+  const medianPpsf = (
+    comps: Array<{ pricePerSqft?: number }> | undefined
+  ): { median: number; count: number } | null => {
+    if (!comps || comps.length === 0) return null;
+    const valid = comps
+      .map((c) => c.pricePerSqft)
       .filter((v): v is number => typeof v === "number" && v > 0 && v < 5000);
-    if (validPpsf.length >= 3) {
-      const sorted = [...validPpsf].sort((a, b) => a - b);
-      const median = sorted[Math.floor(sorted.length / 2)];
+    if (valid.length === 0) return null;
+    const sorted = [...valid].sort((a, b) => a - b);
+    return { median: sorted[Math.floor(sorted.length / 2)], count: valid.length };
+  };
+
+  if (!nb || nb.sales.length === 0) {
+    const fallback =
+      strategy === "flip_fix"
+        ? DEFAULT_FLIP_PRICE_PER_SQFT[tier]
+        : DEFAULT_SELL_PRICE_PER_SQFT[tier];
+    return {
+      value: fallback,
+      source: "wa_fallback",
+      multiplier:
+        strategy === "flip_fix"
+          ? TIER_FLIP_PREMIUM[tier]
+          : TIER_NEW_CONSTRUCTION_MULTIPLIER[tier],
+      strategy,
+    };
+  }
+
+  // For new-build strategies, filter to NEW CONSTRUCTION comps.
+  if (strategy === "fresh_build" || strategy === "split_build") {
+    const newComps = nb.sales.filter((s) => s.isNewConstructionAtSale === true);
+    const fromNew = medianPpsf(newComps);
+    const mult = TIER_NEW_CONSTRUCTION_MULTIPLIER[tier];
+    if (fromNew && fromNew.count >= 3) {
       return {
-        value: Math.round(median * mult),
-        source: "neighborhood",
-        neighborhoodMedianPpsf: median,
-        compCount: validPpsf.length,
-        tierMultiplier: mult,
+        value: Math.round(fromNew.median * mult),
+        source: "neighborhood_new",
+        neighborhoodMedianPpsf: fromNew.median,
+        compCount: fromNew.count,
+        multiplier: mult,
+        strategy,
       };
     }
+    // Fall back to all comps with the new-construction multiplier.
+    const fromAll = medianPpsf(nb.sales);
+    if (fromAll && fromAll.count >= 3) {
+      return {
+        value: Math.round(fromAll.median * mult),
+        source: "neighborhood_all",
+        neighborhoodMedianPpsf: fromAll.median,
+        compCount: fromAll.count,
+        multiplier: mult,
+        strategy,
+      };
+    }
+    return {
+      value: DEFAULT_SELL_PRICE_PER_SQFT[tier],
+      source: "wa_fallback",
+      multiplier: mult,
+      strategy,
+    };
   }
+
+  // main_adu: prefer SFR+ADU comps, fall back to recent SFRs, then all.
+  if (strategy === "main_adu") {
+    const mult = TIER_NEW_CONSTRUCTION_MULTIPLIER[tier];
+    const aduComps = nb.sales.filter((s) => s.typology === "sfr_with_adu");
+    const fromAdu = medianPpsf(aduComps);
+    if (fromAdu && fromAdu.count >= 3) {
+      return {
+        value: Math.round(fromAdu.median * mult),
+        source: "neighborhood_new",
+        neighborhoodMedianPpsf: fromAdu.median,
+        compCount: fromAdu.count,
+        multiplier: mult,
+        strategy,
+      };
+    }
+    const recentSfr = nb.sales.filter(
+      (s) => s.typology === "sfr" && (s.isNewConstructionAtSale || (s.yearBuilt ?? 0) >= 2015)
+    );
+    const fromRecentSfr = medianPpsf(recentSfr);
+    if (fromRecentSfr && fromRecentSfr.count >= 3) {
+      return {
+        value: Math.round(fromRecentSfr.median * mult),
+        source: "neighborhood_new",
+        neighborhoodMedianPpsf: fromRecentSfr.median,
+        compCount: fromRecentSfr.count,
+        multiplier: mult,
+        strategy,
+      };
+    }
+    const fromAll = medianPpsf(nb.sales);
+    if (fromAll && fromAll.count >= 3) {
+      return {
+        value: Math.round(fromAll.median * mult),
+        source: "neighborhood_all",
+        neighborhoodMedianPpsf: fromAll.median,
+        compCount: fromAll.count,
+        multiplier: mult,
+        strategy,
+      };
+    }
+    return {
+      value: DEFAULT_SELL_PRICE_PER_SQFT[tier],
+      source: "wa_fallback",
+      multiplier: mult,
+      strategy,
+    };
+  }
+
+  // flip_fix: comp pool = ALL existing-home resale (SFRs, both new and old).
+  // Apply RENOVATION premium, not new-construction premium.
+  if (strategy === "flip_fix") {
+    const mult = TIER_FLIP_PREMIUM[tier];
+    // Prefer non-new comps since flips compete with the existing-home market.
+    const resaleComps = nb.sales.filter(
+      (s) =>
+        (s.typology === "sfr" || s.typology === "sfr_with_adu") &&
+        !s.isNewConstructionAtSale
+    );
+    const fromResale = medianPpsf(resaleComps);
+    if (fromResale && fromResale.count >= 3) {
+      return {
+        value: Math.round(fromResale.median * mult),
+        source: "neighborhood_resale",
+        neighborhoodMedianPpsf: fromResale.median,
+        compCount: fromResale.count,
+        multiplier: mult,
+        strategy,
+      };
+    }
+    const fromAll = medianPpsf(nb.sales);
+    if (fromAll && fromAll.count >= 3) {
+      return {
+        value: Math.round(fromAll.median * mult),
+        source: "neighborhood_all",
+        neighborhoodMedianPpsf: fromAll.median,
+        compCount: fromAll.count,
+        multiplier: mult,
+        strategy,
+      };
+    }
+    return {
+      value: DEFAULT_FLIP_PRICE_PER_SQFT[tier],
+      source: "wa_fallback",
+      multiplier: mult,
+      strategy,
+    };
+  }
+
+  // Default (pass etc): fall back to standard new construction default.
   return {
     value: DEFAULT_SELL_PRICE_PER_SQFT[tier],
     source: "wa_fallback",
-    tierMultiplier: mult,
+    multiplier: TIER_NEW_CONSTRUCTION_MULTIPLIER[tier],
+    strategy,
   };
 }
 
-// Estimate sale price based on area comps. Now consumes
-// getDefaultSellPricePerSqft so the same logic powers both UI defaults
-// and the underlying calculation.
+// ─── Strategy-specific construction cost ────────────────────────────────────
+//
+// Fix-n-upper renovation is fundamentally cheaper per sqft than new construction
+// — we're touching finishes/systems, not pouring foundation. WA renovation
+// typically runs $100–250/sqft depending on quality, vs new construction
+// $220–650/sqft.
+//
+// Formula: max($100 floor, tier_new_cost × 0.40). Premium/luxury reno scales
+// with tier (better finishes cost more), but always at ~40% of new-construction
+// cost for the same tier.
+
+const FLIP_COST_FLOOR_PER_SQFT = 100;
+const FLIP_COST_RATIO = 0.40;
+
+export function getEffectiveCostPerSqft(strategy: Strategy, tierCostPerSqft: number): number {
+  if (strategy === "flip_fix") {
+    return Math.max(FLIP_COST_FLOOR_PER_SQFT, Math.round(tierCostPerSqft * FLIP_COST_RATIO));
+  }
+  return tierCostPerSqft;
+}
+
+// Estimate sale price using the strategy-aware $/sqft helper.
 function estimateSalePrice(
   property: PropertyData,
   strategy: Strategy,
   tier: QualityTier,
   buildSqft: number
 ): number {
-  const pricePerSqft = getDefaultSellPricePerSqft(property, tier).value;
+  const pricePerSqft = getDefaultSellPricePerSqft(property, tier, strategy).value;
 
   switch (strategy) {
     case "fresh_build":
       return buildSqft * pricePerSqft;
     case "split_build": {
-      // Splits sell as N similarly-sized homes at the same $/sqft.
+      // Splits sell as N similarly-sized new homes at the new-construction $/sqft.
       return buildSqft * pricePerSqft;
     }
     case "main_adu": {
@@ -284,8 +537,9 @@ function estimateSalePrice(
       return mainValue + aduValue;
     }
     case "flip_fix": {
-      // Renovated homes sell at a discount to new construction.
-      return buildSqft * pricePerSqft * 0.80;
+      // pricePerSqft here is already the renovated-resale price (not new-construction).
+      // No additional discount needed — the strategy-aware helper handled it.
+      return buildSqft * pricePerSqft;
     }
     default:
       return 0;
@@ -331,6 +585,8 @@ export function calculateAnalysis(
   }
 
   const buildSqft = overrides?.buildSqft ?? safeMaxSqft;
+  // Strategy-aware construction cost: flip_fix uses renovation rate, not new-build cost.
+  const effectiveCostPerSqft = getEffectiveCostPerSqft(strategy, costPerSqft);
   const permitMonths = getPermitMonths(strategy);
   const buildMonths = getBuildMonths(strategy, tier, buildSqft);
   const expectedSalePrice = overrides?.sellPricePerSqft
@@ -346,14 +602,14 @@ export function calculateAnalysis(
   const loanAmount = purchasePrice - downPayment;
   const acquisitionCost = purchasePrice + closingCosts;
 
-  // Construction costs
+  // Construction costs — use effective cost per sqft (renovation rate for flip_fix).
   const demolitionCost = strategy !== "flip_fix" ? 20000 : 0;
-  const architectFees = strategy !== "flip_fix" ? buildSqft * costPerSqft * 0.05 : 0;
+  const architectFees = strategy !== "flip_fix" ? buildSqft * effectiveCostPerSqft * 0.05 : 0;
   const permitFees = strategy === "split_build" ? 35000 : strategy === "flip_fix" ? 5000 : 20000;
-  const contingency = buildSqft * costPerSqft * 0.12;
+  const contingency = buildSqft * effectiveCostPerSqft * 0.12;
   const landscaping = strategy !== "flip_fix" ? 25000 : 5000;
   const constructionCost =
-    buildSqft * costPerSqft +
+    buildSqft * effectiveCostPerSqft +
     demolitionCost +
     architectFees +
     permitFees +
@@ -404,6 +660,48 @@ export function calculateAnalysis(
   // Confidence scoring (architect-mode §6). Only meaningful when we have guardrails.
   let confidenceScore: number | undefined;
   let confidenceLabel: AnalysisResult["confidenceLabel"];
+  // Caveats start from guardrails and get strategy-specific additions appended.
+  const extraCaveats: typeof guardrails extends { caveats: infer C } ? C : never[] =
+    [] as unknown as never[];
+  type CaveatLite = { severity: "info" | "warning" | "block"; text: string };
+  const localCaveats: CaveatLite[] = [];
+
+  // ── Split-and-build verification caveat ────────────────────────────────
+  // Without a full zoning KB (Wave 1), we cannot verify the city's specific
+  // short-plat rules: max lots, geometry, frontage, access easements, critical
+  // areas, deed restrictions. The lot-size math is necessary but NOT sufficient.
+  if (strategy === "split_build" && feasibility !== "not_allowed") {
+    const districtMin = estimateDistrictMinLotSqft(property.zoningCode);
+    if (!districtMin) {
+      localCaveats.push({
+        severity: "warning",
+        text:
+          `Zoning code "${property.zoningCode}" not recognized — district minimum lot size cannot be inferred. ` +
+          `Split feasibility is speculative; confirm with city planning department before offering.`,
+      });
+    } else {
+      const required = districtMin * 2;
+      const margin = ((property.lotSizeSqft - required) / required) * 100;
+      localCaveats.push({
+        severity: feasibility === "conditional" ? "warning" : "info",
+        text:
+          `Subdivision math: lot ${property.lotSizeSqft.toLocaleString()} sqft vs. required ${required.toLocaleString()} sqft ` +
+          `(2× estimated district min of ${districtMin.toLocaleString()} sqft) — ${margin > 0 ? "+" : ""}${margin.toFixed(0)}% margin. ` +
+          `Lot-size math alone doesn't guarantee a short plat will be approved — confirm setback, frontage, access, ` +
+          `and critical-area rules with the city.`,
+      });
+    }
+    // Always add the "needs KB verification" caveat for split until the full
+    // zoning KB is wired up. This is the dominant uncertainty driver.
+    localCaveats.push({
+      severity: "block",
+      text:
+        `Split confidence is conservatively capped at 65 until LandMath's per-city ` +
+        `zoning rulebook is wired (Wave 1). Few WA lots actually qualify for a short plat ` +
+        `even when the lot size math works — verify with a planner before committing capital.`,
+    });
+  }
+
   if (guardrails && property.neighborhood) {
     const nb = property.neighborhood;
     const recentCutoff = Date.now() - 12 * 30 * 24 * 60 * 60 * 1000;
@@ -412,9 +710,6 @@ export function calculateAnalysis(
       return !isNaN(t) && t >= recentCutoff;
     });
     const confidence = computeConfidence({
-      // For now we don't have a city-by-city KB plugged in (Wave 1 work),
-      // so "known" means we at least have a zoning code string and the
-      // KC PropertyInfo source is authoritative for KC parcels.
       zoningKnown: Boolean(property.zoningCode && property.zoningCode !== "Unknown"),
       zoningRecentlyVerified: false, // flip to true once KB lookup is wired
       lotSizeFromGis: property.lotSizeSqft > 0,
@@ -424,7 +719,21 @@ export function calculateAnalysis(
     });
     confidenceScore = confidence.score;
     confidenceLabel = confidence.label;
+
+    // Hard cap on split_build confidence until the zoning KB is wired.
+    // Even a lot that clears the 2× math should not project "High" confidence
+    // — short plats are gated on city-specific rules we don't yet ingest.
+    if (strategy === "split_build" && confidenceScore !== undefined) {
+      confidenceScore = Math.min(65, confidenceScore);
+      confidenceLabel =
+        confidenceScore >= 65
+          ? "Moderate"
+          : confidenceScore >= 40
+          ? "Low"
+          : "Speculative";
+    }
   }
+  void extraCaveats; // reserved for future merges from guardrails
 
   return {
     id: `${property.id}-${strategy}-${Date.now()}`,
@@ -454,7 +763,7 @@ export function calculateAnalysis(
     createdAt: new Date().toISOString(),
     confidence: confidenceScore,
     confidenceLabel,
-    caveats: guardrails?.caveats,
+    caveats: [...localCaveats, ...(guardrails?.caveats ?? [])],
     typologyFit: guardrails?.typologyFit,
     typologyShare: guardrails?.typologyShare,
     trendBumpApplied: guardrails?.trendBumpApplied,

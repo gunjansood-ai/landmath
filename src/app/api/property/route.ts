@@ -205,13 +205,28 @@ async function buildNeighborhood(
 
   const typology = computeTypologyDistribution(parcelSamples);
 
-  // 2. Sales (always 800m for citation list; radius is for typology only)
-  const salesRaw = ((await queryNearbySales(lat, lng, 800)) as RawSale[]).filter(
+  // 2. Sales — adaptive radius to ensure enough comp pool for strategy filtering.
+  //    Start 800m; widen to 1200m if <15 raw comps; 1609m (1 mile) if still <10.
+  //    Strategy-aware filtering on the client will narrow this pool further.
+  let salesRaw = ((await queryNearbySales(lat, lng, 800)) as RawSale[]).filter(
     (s) => s.PIN && s.SalePrice && (s.SalePrice as number) > 100000
   );
+  if (salesRaw.length < 15) {
+    const wider = ((await queryNearbySales(lat, lng, 1200)) as RawSale[]).filter(
+      (s) => s.PIN && s.SalePrice && (s.SalePrice as number) > 100000
+    );
+    if (wider.length > salesRaw.length) salesRaw = wider;
+  }
+  if (salesRaw.length < 10) {
+    const widest = ((await queryNearbySales(lat, lng, 1609)) as RawSale[]).filter(
+      (s) => s.PIN && s.SalePrice && (s.SalePrice as number) > 100000
+    );
+    if (widest.length > salesRaw.length) salesRaw = widest;
+  }
 
-  // Citation list: top 10, sorted newest first (already by query).
-  const topSales = salesRaw.slice(0, 10);
+  // Citation pool: top 20 so strategy filters have enough to bite into;
+  // UI defaults to showing 10 but can drill in.
+  const topSales = salesRaw.slice(0, 20);
 
   // 3. Fetch assessor sqft for the citation sales (parallel, capped).
   const assessorByPin = await fetchAssessorBatch(topSales.map((s) => s.PIN));
@@ -219,8 +234,14 @@ async function buildNeighborhood(
   const sales: Comp[] = topSales.map((s): Comp => {
     const ab = assessorByPin[s.PIN];
     const sqft = ab?.sqftLiving;
+    const yearBuilt = ab?.yearBuilt && ab.yearBuilt > 1800 ? ab.yearBuilt : undefined;
     const typo = bucketParcelByPreuse(s.Principal_Use);
     const salePrice = Number(s.SalePrice ?? 0);
+    const saleTs = parseSaleDate(s.SaleDate);
+    const saleYear = saleTs > 0 ? new Date(saleTs).getFullYear() : new Date().getFullYear();
+    // Classify as new construction at time of sale if built within 5 years prior.
+    const isNewConstructionAtSale =
+      yearBuilt !== undefined && yearBuilt >= saleYear - 5;
     return {
       pin: s.PIN,
       address: s.address ?? "Unknown",
@@ -231,6 +252,8 @@ async function buildNeighborhood(
       principalUse: s.Principal_Use ?? "",
       typology: typo,
       sqftLiving: sqft && sqft > 200 ? sqft : undefined,
+      yearBuilt,
+      isNewConstructionAtSale,
       pricePerSqft: sqft && sqft > 200 && salePrice ? Math.round(salePrice / sqft) : undefined,
       sourceUrl: KC_ASSESSOR_DETAIL(s.PIN),
       parcelViewerUrl: KC_PARCEL_VIEWER(s.PIN),
