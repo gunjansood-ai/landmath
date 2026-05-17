@@ -309,7 +309,7 @@ const DEFAULT_FLIP_PRICE_PER_SQFT: Record<QualityTier, number> = {
 };
 
 // ─── ZIP-level new-construction $/sqft overrides ─────────────────────────────
-// When the comp pipeline is unavailable (RentCast down, no KC sqft data),
+// When the comp pipeline is unavailable (APIllow down, no KC sqft data),
 // we still want SOMETHING smarter than a flat WA average for known luxury
 // ZIPs. These represent typical NEW-CONSTRUCTION sale prices (premium tier
 // baseline) by ZIP. Tier multiplier is applied on top for luxury/ultra.

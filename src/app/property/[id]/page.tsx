@@ -678,15 +678,15 @@ export default function PropertyAnalysis() {
                 </p>
                 {property.neighborhood.compDiagnostic && (
                   <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-1 font-mono">
-                    Comps: {property.neighborhood.compDiagnostic.rentCastReturned} returned ·{" "}
+                    Comps: {property.neighborhood.compDiagnostic.apiillowReturned} returned ·{" "}
                     {property.neighborhood.compDiagnostic.compsWithSqft} with sqft ·{" "}
                     {property.neighborhood.compDiagnostic.newConstructionComps} new construction ·{" "}
                     source: {property.neighborhood.compDiagnostic.source}
-                    {property.neighborhood.compDiagnostic.rentCastStatus !== "ok" && (
+                    {property.neighborhood.compDiagnostic.apiillowStatus !== "ok" && (
                       <span className="ml-2 text-red-500">
-                        ⚠ RentCast: {property.neighborhood.compDiagnostic.rentCastStatus}
-                        {property.neighborhood.compDiagnostic.rentCastHttpStatus
-                          ? ` (${property.neighborhood.compDiagnostic.rentCastHttpStatus})`
+                        ⚠ APIllow: {property.neighborhood.compDiagnostic.apiillowStatus}
+                        {property.neighborhood.compDiagnostic.apiillowHttpStatus
+                          ? ` (${property.neighborhood.compDiagnostic.apiillowHttpStatus})`
                           : ""}
                       </span>
                     )}
@@ -859,29 +859,29 @@ export default function PropertyAnalysis() {
           </div>
         </div>
 
-        {/* RentCast subscription warning — surfaces only when API key is dead */}
-        {property.neighborhood?.compDiagnostic?.rentCastStatus === "http_error" &&
-          property.neighborhood.compDiagnostic.rentCastHttpStatus === 401 && (
+        {/* APIllow key warning — surfaces only when API key is missing or dead */}
+        {property.neighborhood?.compDiagnostic?.apiillowStatus === "http_error" &&
+          property.neighborhood.compDiagnostic.apiillowHttpStatus === 401 && (
             <div className="mb-6 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/40 rounded-2xl p-4">
               <div className="flex items-start gap-3">
                 <AlertOctagon size={18} className="text-red-600 flex-shrink-0 mt-0.5" />
                 <div className="flex-1">
                   <p className="text-sm font-semibold text-red-900 dark:text-red-200">
-                    RentCast API subscription inactive — comp data unavailable
+                    APIllow API key invalid — comp data unavailable
                   </p>
                   <p className="text-xs text-red-800 dark:text-red-300 mt-1 leading-relaxed">
                     Sale $/sqft is falling back to ZIP-level baseline (or WA flat default if your ZIP isn&apos;t in the table).
                     These are reasonable estimates but not as accurate as live neighborhood comps.
-                    To restore comp-based pricing, renew your subscription at{" "}
+                    To restore comp-based pricing, get a key at{" "}
                     <a
-                      href="https://app.rentcast.io/app/api"
+                      href="https://apillow.co/#signup"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="underline font-medium hover:text-red-900"
                     >
-                      app.rentcast.io/app/api
+                      apillow.co
                     </a>
-                    {" "}and update <code className="px-1 py-0.5 bg-red-100 dark:bg-red-900/40 rounded">RENTCAST_API_KEY</code> on Vercel.
+                    {" "}and update <code className="px-1 py-0.5 bg-red-100 dark:bg-red-900/40 rounded">APILLOW_API_KEY</code> on Vercel.
                   </p>
                 </div>
               </div>

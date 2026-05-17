@@ -28,71 +28,116 @@ const KC_ASSESSOR_DETAIL = (pin: string) =>
 const KC_PARCEL_VIEWER = (pin: string) =>
   `https://gismaps.kingcounty.gov/parcelviewer2/?pin=${pin}`;
 
-const RENTCAST_KEY = process.env.RENTCAST_API_KEY;
+const APILLOW_KEY = process.env.APILLOW_API_KEY;
+const APILLOW_BASE = "https://api.apillow.co/v1";
 
-// ─── RentCast comps (real sqft + yearBuilt; KC Assessor HTML is AJAX-only) ───
+// ─── APIllow comps (real sqft + yearBuilt; KC Assessor HTML is AJAX-only) ────
 //
 // IMPORTANT: KC Assessor's Dashboard.aspx / Detail.aspx are ASP.NET WebForms
 // pages that load all property data via __VIEWSTATE postback. The raw HTML
 // contains zero useful data — sqft, yearBuilt, beds, baths are all blank.
-// So we use RentCast (free tier 50 calls/mo) for cited comp enrichment.
+// We use APIllow (Zillow data API) for cited comp enrichment. APIllow is async:
+// POST a job → poll GET /v1/results/{job_id} until complete.
 
-interface RentCastListing {
-  formattedAddress?: string;
-  price?: number;
-  squareFootage?: number;
-  bedrooms?: number;
-  bathrooms?: number;
-  yearBuilt?: number;
-  listedDate?: string;
-  removedDate?: string;
-  lastSeenDate?: string;
-  distance?: number;
-  propertyType?: string;
+interface ApiillowProperty {
+  street_address?: string;
+  city?: string;
+  state?: string;
+  zipcode?: string;
   latitude?: number;
   longitude?: number;
+  price?: number;
+  last_sold_price?: number;
+  living_area?: number;
+  bedrooms?: number;
+  bathrooms?: number;
+  year_built?: number;
+  property_type?: string;
+  price_history?: Array<{ date?: string; event?: string; price?: number }>;
 }
 
-interface RentCastFetchResult {
-  comps: RentCastListing[];
+interface ApiillowFetchResult {
+  comps: ApiillowProperty[];
   status: "ok" | "no_key" | "http_error" | "exception";
   httpStatus?: number;
 }
 
-async function fetchRentCastSoldComps(
+function haversineMiles(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 3958.8;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+async function pollApiillowJob(
+  jobId: string,
+  timeoutMs = 20000
+): Promise<ApiillowProperty[]> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const res = await fetch(`${APILLOW_BASE}/results/${jobId}`, {
+      headers: { "X-API-Key": APILLOW_KEY! },
+    });
+    if (!res.ok) throw new Error(`APIllow poll error: ${res.status}`);
+    const data = await res.json();
+    if (data.status === "complete") {
+      return (data.results ?? [])
+        .filter((r: { success: boolean }) => r.success)
+        .map((r: { property: ApiillowProperty }) => r.property);
+    }
+    if (data.status === "failed") throw new Error("APIllow job failed");
+  }
+  throw new Error("APIllow poll timeout");
+}
+
+async function fetchApiillowSoldComps(
   lat: number,
-  lng: number
-): Promise<RentCastFetchResult> {
-  if (!RENTCAST_KEY || RENTCAST_KEY === "your_rentcast_api_key_here") {
+  lng: number,
+  city: string | null
+): Promise<ApiillowFetchResult> {
+  if (!APILLOW_KEY || APILLOW_KEY === "your_apillow_api_key_here") {
     return { comps: [], status: "no_key" };
   }
-  // Pull SOLD listings within 1.5 miles, last 24 months. Bigger radius +
-  // higher limit gives us enough new-construction comps to filter to.
-  const params = new URLSearchParams({
-    latitude: lat.toString(),
-    longitude: lng.toString(),
-    radius: "1.5",
-    propertyType: "Single Family",
-    status: "Sold",
-    limit: "50",
-    daysOld: "730",
-  });
+
+  // APIllow searches by city or ZIP, not lat/lng radius. We search sold SFRs
+  // in the subject city and then filter to 1.5 miles post-fetch.
+  const searchQuery = city ? `${city} WA` : `${lat.toFixed(3)},${lng.toFixed(3)}`;
+
   try {
-    const res = await fetch(
-      `https://api.rentcast.io/v1/listings/sale?${params}`,
-      {
-        headers: { accept: "application/json", "X-Api-Key": RENTCAST_KEY },
-        next: { revalidate: 86400 },
-      }
-    );
+    const res = await fetch(`${APILLOW_BASE}/properties`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": APILLOW_KEY },
+      body: JSON.stringify({
+        search: searchQuery,
+        type: "sold",
+        property_type: "house",
+        max_items: 100,
+      }),
+    });
     if (!res.ok) {
-      console.error("RentCast comps error:", res.status);
+      console.error("APIllow comps submit error:", res.status);
       return { comps: [], status: "http_error", httpStatus: res.status };
     }
-    const data = await res.json();
-    return { comps: Array.isArray(data) ? data : [], status: "ok" };
+    const { job_id } = await res.json();
+    const all = await pollApiillowJob(job_id);
+
+    // Filter to 1.5-mile radius from subject.
+    const nearby = all.filter(
+      (p) =>
+        p.latitude &&
+        p.longitude &&
+        haversineMiles(lat, lng, p.latitude, p.longitude) <= 1.5
+    );
+
+    return { comps: nearby, status: "ok" };
   } catch (err) {
-    console.error("RentCast fetch failed:", err);
+    console.error("APIllow fetch failed:", err);
     return { comps: [], status: "exception" };
   }
 }
@@ -196,7 +241,7 @@ async function getAssessorDetails(pin: string): Promise<AssessorBits | null> {
 }
 
 // NOTE: fetchAssessorBatch removed — KC Assessor HTML is AJAX-loaded and
-// returns no useful raw HTML for sqft/yearBuilt. RentCast (see fetchRentCastSoldComps)
+// returns no useful raw HTML for sqft/yearBuilt. APIllow (see fetchApiillowSoldComps)
 // is now the source of truth for comp enrichment. The single-property
 // getAssessorDetails above is retained for the subject (best-effort only).
 
@@ -290,12 +335,12 @@ async function buildNeighborhood(
   // UI defaults to showing 10 but can drill in.
   const topSales = salesRaw.slice(0, 20);
 
-  // 3. RentCast comps — primary source of $/sqft data (has real sqft + yearBuilt).
-  //    KC Assessor HTML can't be scraped; KC layer 3 sales lack sqft. RentCast it is.
-  const rentCastResult = await fetchRentCastSoldComps(lat, lng);
-  const rentCastComps = rentCastResult.comps;
+  // 3. APIllow comps — primary source of $/sqft data (has real sqft + yearBuilt).
+  //    KC Assessor HTML can't be scraped; KC layer 3 sales lack sqft. APIllow it is.
+  const apiillowResult = await fetchApiillowSoldComps(lat, lng, subjectCity);
+  const apiillowComps = apiillowResult.comps;
 
-  // Build a KC-address-keyed map so we can enrich RentCast comps with a KC PIN
+  // Build a KC-address-keyed map so we can enrich APIllow comps with a KC PIN
   // for drill-in (best effort — many won't match, that's OK).
   const normalizeAddr = (s: string): string =>
     s.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
@@ -315,14 +360,19 @@ async function buildNeighborhood(
     return kcByStreet.get(normalizeAddr(streetOnly));
   };
 
-  // Build the cited-comp set FROM RentCast (every comp has sqft + yearBuilt).
-  const rentCastSales: Comp[] = rentCastComps
-    .filter((r) => r.formattedAddress && r.price && r.price > 100000)
-    .map((r): Comp => {
-      const sqft = r.squareFootage && r.squareFootage > 200 ? r.squareFootage : undefined;
-      const yearBuilt = r.yearBuilt && r.yearBuilt > 1800 ? r.yearBuilt : undefined;
-      const saleDate = r.lastSeenDate || r.removedDate || r.listedDate || "";
-      const saleTs = Date.parse(saleDate);
+  // Build the cited-comp set FROM APIllow (every comp has sqft + yearBuilt).
+  const apiillowSales: Comp[] = apiillowComps
+    .filter((p) => p.street_address && (p.last_sold_price ?? p.price ?? 0) > 100000)
+    .map((p): Comp => {
+      const price = p.last_sold_price ?? p.price ?? 0;
+      const sqft = p.living_area && p.living_area > 200 ? p.living_area : undefined;
+      const yearBuilt = p.year_built && p.year_built > 1800 ? p.year_built : undefined;
+      // Extract sold date from price_history events.
+      const soldEvent = p.price_history
+        ? [...p.price_history].reverse().find((e) => e.event?.toLowerCase().includes("sold"))
+        : undefined;
+      const saleDate = soldEvent?.date?.slice(0, 10) ?? "";
+      const saleTs = saleDate ? Date.parse(saleDate) : NaN;
       const saleYear = !isNaN(saleTs)
         ? new Date(saleTs).getFullYear()
         : new Date().getFullYear();
@@ -331,27 +381,30 @@ async function buildNeighborhood(
       // presents as modern and prices accordingly.
       const isNewConstructionAtSale =
         yearBuilt !== undefined && yearBuilt >= saleYear - 10;
+      const formattedAddr = p.street_address
+        ? `${p.street_address}, ${p.city ?? ""}, ${p.state ?? ""} ${p.zipcode ?? ""}`.trim()
+        : "Unknown";
       // Best-effort KC enrichment for drill-in URL.
-      const kc = findKcMatch(r.formattedAddress ?? "");
+      const kc = findKcMatch(formattedAddr);
       return {
         pin: kc?.PIN ?? "",
-        address: r.formattedAddress ?? "Unknown",
-        salePrice: r.price ?? 0,
-        saleDate: saleDate ? saleDate.slice(0, 10) : "",
-        principalUse: r.propertyType ?? "Single Family",
+        address: formattedAddr,
+        salePrice: price,
+        saleDate,
+        principalUse: p.property_type ?? "Single Family",
         typology: "sfr",
         sqftLiving: sqft,
         yearBuilt,
         isNewConstructionAtSale,
-        pricePerSqft: sqft && r.price ? Math.round(r.price / sqft) : undefined,
+        pricePerSqft: sqft && price ? Math.round(price / sqft) : undefined,
         sourceUrl: kc?.PIN
           ? KC_ASSESSOR_DETAIL(kc.PIN)
-          : `https://www.redfin.com/?q=${encodeURIComponent(r.formattedAddress ?? "")}`,
+          : `https://www.redfin.com/?q=${encodeURIComponent(formattedAddr)}`,
         parcelViewerUrl: kc?.PIN ? KC_PARCEL_VIEWER(kc.PIN) : undefined,
       };
     });
 
-  // KC fallback comps — used only when RentCast returned nothing. No sqft data
+  // KC fallback comps — used only when APIllow returned nothing. No sqft data
   // means these won't contribute to ppsf median, but they're cited for visibility.
   const kcFallbackSales: Comp[] = topSales.map((s): Comp => {
     const salePrice = Number(s.SalePrice ?? 0);
@@ -374,22 +427,22 @@ async function buildNeighborhood(
     };
   });
 
-  // RentCast primary; KC fallback only if RentCast is empty.
+  // APIllow primary; KC fallback only if APIllow is empty.
   const sales: Comp[] =
-    rentCastSales.length > 0
-      ? rentCastSales.slice(0, 15)
+    apiillowSales.length > 0
+      ? apiillowSales.slice(0, 15)
       : kcFallbackSales.slice(0, 10);
 
   // ── Diagnostics for the UI ──────────────────────────────────────────────
   const compsWithSqft = sales.filter((c) => c.sqftLiving !== undefined).length;
   const newConstructionComps = sales.filter((c) => c.isNewConstructionAtSale).length;
   const diagnostic = {
-    rentCastStatus: rentCastResult.status,
-    rentCastHttpStatus: rentCastResult.httpStatus,
-    rentCastReturned: rentCastComps.length,
+    apiillowStatus: apiillowResult.status,
+    apiillowHttpStatus: apiillowResult.httpStatus,
+    apiillowReturned: apiillowComps.length,
     compsWithSqft,
     newConstructionComps,
-    source: (rentCastSales.length > 0 ? "rentcast" : "kc_only") as "rentcast" | "kc_only",
+    source: (apiillowSales.length > 0 ? "apillow" : "kc_only") as "apillow" | "kc_only",
   };
 
   // 4. Trend signal: recent non-SFR sales in last 24 months.

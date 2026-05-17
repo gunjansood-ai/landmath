@@ -64,12 +64,12 @@ export interface TypologyDistribution {
 }
 
 export interface CompDataDiagnostic {
-  rentCastStatus: "ok" | "no_key" | "http_error" | "exception";
-  rentCastHttpStatus?: number;
-  rentCastReturned: number;
+  apiillowStatus: "ok" | "no_key" | "http_error" | "exception";
+  apiillowHttpStatus?: number;
+  apiillowReturned: number;
   compsWithSqft: number;
   newConstructionComps: number;
-  source: "rentcast" | "kc_only";
+  source: "apillow" | "kc_only";
 }
 
 export interface NeighborhoodData {
