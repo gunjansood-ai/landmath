@@ -12,6 +12,23 @@ import {
   computeNeighborhoodGuardrails,
   type NeighborhoodGuardrails,
 } from "@/lib/buildability";
+import {
+  lookupZoning,
+  isSingleFamilyOnly,
+  allowsMultifamily,
+  allowsTownhomes,
+  type ZoningRule,
+} from "@/lib/zoning/registry";
+import {
+  hazardFeasibilityFloor,
+  combineFeasibility,
+  hazardConfidencePenalty,
+} from "@/lib/hazards/kc-gis";
+import {
+  applyStateLaws,
+  getMiddleHousingOverlay,
+} from "@/lib/zoning/wa-state-laws";
+import { runSensitivity, type SensitivityReport } from "@/lib/sensitivity";
 
 // Cost per sqft by quality tier (WA state defaults)
 export const DEFAULT_COST_PER_SQFT: Record<QualityTier, number> = {
@@ -92,15 +109,31 @@ export const STRATEGIES: Record<
 
 /**
  * Estimate the district minimum lot size from a zoning code string.
- * Handles common WA patterns:
- *   - SF-5000, SF-7200 → numeric is the min lot in sqft
- *   - R-5, R-7.2, RS-5 → numeric is units-per-acre OR min lot in 1000s of sqft
- *   - R-1, R-2, R-3 → dwelling-units-per-acre (smaller number = larger lot)
- *   - NR-1 / RA-2.5 / RA-5 (King County rural) → 1, 2.5, 5 acres respectively
- *   - LR1/LR2/LR3, MR, HR → Seattle low-rise / mid-rise / high-rise (no min lot)
- *   - Returns null when the code is unrecognized.
+ *
+ * Two-step lookup:
+ *   1. If `city` + `state` are provided AND the (state, city, code) is in
+ *      the jurisdiction registry, return that authoritative value. This is
+ *      always preferred — it's pulled directly from the municipal code chart.
+ *   2. Otherwise fall back to regex parsing of common WA patterns:
+ *      - SF-5000, SF-7200 → numeric is the min lot in sqft
+ *      - R-5, R-7.2, RS-5 → numeric is units-per-acre OR min lot in 1000s of sqft
+ *      - R-1, R-2, R-3 → dwelling-units-per-acre (smaller number = larger lot)
+ *      - NR-1 / RA-2.5 / RA-5 (King County rural) → 1 / 2.5 / 5 acres
+ *      - LR1/LR2/LR3, MR, HR → Seattle low-rise / mid-rise / high-rise (no min lot)
+ *      - Returns null when the code is unrecognized.
  */
-export function estimateDistrictMinLotSqft(zoningCode: string | null | undefined): number | null {
+export function estimateDistrictMinLotSqft(
+  zoningCode: string | null | undefined,
+  city?: string | null,
+  state?: string | null,
+): number | null {
+  // Step 1: jurisdiction registry — authoritative when present.
+  const rule = lookupZoning({ state, city, code: zoningCode });
+  if (rule && rule.minLotSqft != null) return rule.minLotSqft;
+  // If the registry knows this city/code but it's density-governed (no min lot),
+  // we still don't want to fall through to a misleading regex guess.
+  if (rule && rule.minLotSqft == null) return null;
+
   if (!zoningCode || /^unknown$/i.test(zoningCode)) return null;
   const upper = zoningCode.trim().toUpperCase();
 
@@ -158,7 +191,33 @@ type ZoningClass =
   | "rural"        // RA/NR zones
   | "unknown";
 
-export function classifyZoning(zoningCode: string | null | undefined): ZoningClass {
+export function classifyZoning(
+  zoningCode: string | null | undefined,
+  city?: string | null,
+  state?: string | null,
+): ZoningClass {
+  // Step 1: jurisdiction registry. This is the only way to correctly
+  // disambiguate Bellevue "SR-3" (single-family) from a generic "R-3"
+  // (often multi-family). Without it, regex matches on the bare letter+digit
+  // produced false positives in townhome / multifamily feasibility.
+  const rule = lookupZoning({ state, city, code: zoningCode });
+  if (rule) {
+    switch (rule.kind) {
+      case "sf":
+      case "sf_attached":
+        return "sf";
+      case "duplex":
+        return "sf";
+      case "multifamily":
+        return "mr_hr";
+      case "mixed_use":
+      case "commercial":
+        return "commercial";
+      case "rural":
+        return "rural";
+    }
+  }
+
   if (!zoningCode || /^unknown$/i.test(zoningCode)) return "unknown";
   const upper = zoningCode.trim().toUpperCase();
   if (/^(HR|MR)([^0-9]|$)/.test(upper)) return "mr_hr";
@@ -290,11 +349,48 @@ export function getFeasibilityReasoning(
   strategy: Strategy,
   feasibility: "permitted" | "conditional" | "not_allowed"
 ): FeasibilityReasoning {
-  const zoningClass = classifyZoning(property.zoningCode);
-  const districtMin = estimateDistrictMinLotSqft(property.zoningCode);
+  const zoningClass = classifyZoning(property.zoningCode, property.city, property.state);
+  const districtMin = estimateDistrictMinLotSqft(
+    property.zoningCode, property.city, property.state,
+  );
+  const rule: ZoningRule | null = lookupZoning({
+    state: property.state, city: property.city, code: property.zoningCode,
+  });
   const lot = property.lotSizeSqft;
   const links = getZoningLookupLinks(property);
+  // When we have an authoritative citation, prepend it so the user sees the
+  // exact code section that drove the verdict — not a generic "zoning map" link.
+  if (rule) {
+    links.unshift({ label: rule.codeSection, url: rule.codeUrl });
+  }
   const zCode = property.zoningCode || "Unknown";
+  const cite = rule ? ` (per ${rule.codeSection})` : "";
+
+  // WA state law overlay: HB 1110 middle housing + HB 1337 ADUs + SB 5258
+  // unit-lot subdivision. Always evaluated; null when not applicable.
+  const stateLaw = applyStateLaws({
+    city: property.city,
+    state: property.state,
+    baseRule: rule,
+    inUrbanGrowthArea: true, // KC defaults to UGA for our city list
+  });
+  if (stateLaw.middleHousing) {
+    links.push({
+      label: `WA ${stateLaw.middleHousing.statute}`,
+      url: stateLaw.middleHousing.codeUrl,
+    });
+  }
+
+  // Hazard caveats: take the top 3 (block > warning > info) so reasoning
+  // doesn't drown in info-level groundwater bullets.
+  const hazardCaveats = (property.hazards?.caveats ?? [])
+    .slice()
+    .sort((a, b) => {
+      const rank = { block: 0, warning: 1, info: 2 } as const;
+      return rank[a.severity] - rank[b.severity];
+    })
+    .slice(0, 3);
+  const hazardGaps = hazardCaveats.map((c) => c.text);
 
   switch (strategy) {
     case "fresh_build": {
@@ -321,21 +417,47 @@ export function getFeasibilityReasoning(
 
     case "split_build": {
       if (feasibility === "not_allowed") {
-        const reason = !districtMin
-          ? `We couldn't parse a minimum lot size from zoning code "${zCode}", and the lot (${lot.toLocaleString()} sqft) is below our 15,000 sqft conservative threshold for an unrecognized code.`
-          : `Your lot (${lot.toLocaleString()} sqft) is smaller than the 2× district minimum required for a split: ${(districtMin * 2).toLocaleString()} sqft.`;
+        // Three distinct reasons for not_allowed; pick the most specific.
+        let reason: string;
+        if (rule && !rule.allowsShortPlat) {
+          reason =
+            `${zCode} is density-governed (${rule.maxDuPerAcre ?? "?"} DU/acre) and does not allow a per-lot short plat${cite}. ` +
+            `The strategy here is "multifamily," not "split & build."`;
+        } else if (rule && rule.minLotSqft) {
+          const need = rule.minLotSqft * 2;
+          reason =
+            `${zCode} requires a ${rule.minLotSqft.toLocaleString()} sqft minimum lot${cite}. ` +
+            `A 2-lot short plat therefore needs ≥${need.toLocaleString()} sqft. ` +
+            `Your lot is ${lot.toLocaleString()} sqft — ${(need - lot).toLocaleString()} sqft short.`;
+        } else if (districtMin) {
+          reason =
+            `Your lot (${lot.toLocaleString()} sqft) is smaller than the 2× district minimum required for a split: ${(districtMin * 2).toLocaleString()} sqft.`;
+        } else {
+          reason =
+            `We couldn't find an authoritative minimum lot size for "${zCode}" in ${property.city || "this city"}, ` +
+            `and the lot (${lot.toLocaleString()} sqft) is below our 15,000 sqft conservative threshold for an unknown code.`;
+        }
         return {
           verdict: "not_allowed",
-          summary: "Lot too small to split under estimated zoning rules.",
+          summary: rule
+            ? `Lot too small to short-plat under ${zCode}${cite}.`
+            : "Lot too small to split under estimated zoning rules.",
           logic: [reason],
           assumptions: [
-            `District minimum lot size ${districtMin ? `estimated at ${districtMin.toLocaleString()} sqft from code "${zCode}"` : "could not be determined"}.`,
+            rule && rule.minLotSqft
+              ? `Authoritative minimum lot size for ${zCode}: ${rule.minLotSqft.toLocaleString()} sqft (${rule.codeSection}).`
+              : `District minimum lot size ${districtMin ? `estimated at ${districtMin.toLocaleString()} sqft from code "${zCode}"` : "could not be determined"}.`,
             "Two resulting parcels must each meet or exceed the district minimum after the split.",
           ],
-          gaps: [
-            "Zoning code parsing is an estimate. Confirm the actual minimum lot size with city planning.",
-            "Critical areas, deed restrictions, or frontage requirements may impose additional constraints.",
-          ],
+          gaps: rule
+            ? [
+                "Lot averaging or unit lot subdivisions may permit smaller resulting lots in narrow cases — confirm with city planning.",
+                "Critical areas, deed restrictions, frontage width, or access easements may impose additional constraints not visible from the code alone.",
+              ]
+            : [
+                "Zoning code parsing is an estimate. Confirm the actual minimum lot size with city planning.",
+                "Critical areas, deed restrictions, or frontage requirements may impose additional constraints.",
+              ],
           links,
         };
       }
@@ -347,7 +469,9 @@ export function getFeasibilityReasoning(
           ? "Lot size likely supports a two-lot split — verify with city."
           : "Lot is borderline for a split — formal city review required.",
         logic: [
-          districtMin
+          rule && rule.minLotSqft
+            ? `Zoning code "${zCode}" → minimum lot ${rule.minLotSqft.toLocaleString()} sqft (${rule.codeSection}).`
+            : districtMin
             ? `Zoning code "${zCode}" → estimated district minimum lot: ${districtMin.toLocaleString()} sqft.`
             : `Zoning code "${zCode}" not recognized — using 15,000 sqft conservative threshold.`,
           `Your lot: ${lot.toLocaleString()} sqft. Two new lots must each meet the minimum, so the lot needs to be at least ${required?.toLocaleString() ?? "2×"} the district min.`,
@@ -363,7 +487,9 @@ export function getFeasibilityReasoning(
           "Assumption: city allows two detached structures in this zone.",
         ],
         gaps: [
-          "We estimated the district minimum from the zoning code string — the city may use a different value.",
+          rule
+            ? "Minimum lot area is verified, but frontage width, access easements, and tree retention can still block a split."
+            : "We estimated the district minimum from the zoning code string — the city may use a different value.",
           "We didn't check frontage width, which can block a split even when lot area is sufficient.",
           "Short-plat approval involves discretionary review; the lot-size math is necessary but not sufficient.",
           "Tree retention, utility easements, and access width rules vary by city.",
@@ -441,15 +567,22 @@ export function getFeasibilityReasoning(
     case "townhome": {
       if (feasibility === "not_allowed") {
         const isLrOrHigher = ["lr", "mr_hr", "commercial"].includes(zoningClass);
+        const sfOnlyBlock = rule && isSingleFamilyOnly(rule);
         return {
           verdict: "not_allowed",
-          summary: "Townhome/row-house development doesn't appear permitted in this zone.",
+          summary: sfOnlyBlock
+            ? `${zCode} is a single-family-only district — attached townhomes are not permitted${stateLaw.middleHousing ? " under base zoning (but see HB 1110 below)" : ""}.`
+            : "Townhome/row-house development doesn't appear permitted in this zone.",
           logic: [
-            `Zoning code "${zCode}" → classified as "${zoningClass}".`,
-            isLrOrHigher
+            `Zoning code "${zCode}" → classified as "${zoningClass}"${cite}.`,
+            sfOnlyBlock
+              ? `${rule!.codeSection} restricts this district to one detached single-family home per lot. Attached forms (rowhouses, townhomes) are not a permitted use.`
+              : isLrOrHigher
               ? "This is a density zone that typically allows townhomes, but our pattern match didn't find a confirmed match."
               : "Townhomes require at least Low-Rise (LR1) or equivalent attached-housing zoning. Single-family zones typically prohibit them.",
-            `Lot size ${lot.toLocaleString()} sqft is also below our 8,000 sqft minimum for townhome feasibility.`,
+            sfOnlyBlock
+              ? "WA HB 1110 (2023) may force middle-housing options on some SF lots in larger cities — but a townhome project still requires an explicit allowance in your district, which isn't present here."
+              : `Lot size ${lot.toLocaleString()} sqft is also below our 8,000 sqft minimum for townhome feasibility.`,
           ],
           assumptions: [
             "Townhome/row-house = attached housing requiring at least LR1 or RM zoning in most WA cities.",
@@ -491,12 +624,17 @@ export function getFeasibilityReasoning(
 
     case "multifamily": {
       if (feasibility === "not_allowed") {
+        const sfOnlyBlock = rule && isSingleFamilyOnly(rule);
         return {
           verdict: "not_allowed",
-          summary: "Multi-family development doesn't appear permitted in this zone.",
+          summary: sfOnlyBlock
+            ? `${zCode} is a single-family-only district — stacked multifamily (3+ units) is not permitted.`
+            : "Multi-family development doesn't appear permitted in this zone.",
           logic: [
-            `Zoning code "${zCode}" → classified as "${zoningClass}".`,
-            zoningClass === "sf"
+            `Zoning code "${zCode}" → classified as "${zoningClass}"${cite}.`,
+            sfOnlyBlock
+              ? `${rule!.codeSection} permits only one detached single-family residence per lot. A multi-family building requires an upzone (likely to a medium-density or mid-rise district) or a contract rezone.`
+              : zoningClass === "sf"
               ? "Single-family zones prohibit multi-family (3+ unit) buildings. You'd need an upzone or a SEPA rezone process."
               : zoningClass === "lr"
               ? "Seattle LR zones allow townhomes and small multi-family (LR2+ typically allows 6+ units), but the specific subzone limits may cap unit count."
@@ -557,19 +695,43 @@ export function getFeasibilityReasoning(
 }
 
 // Zoning feasibility check.
-// split_build is now properly conservative: must clear 2× district min PLUS a
-// 10% margin (real-world setbacks, frontage, and access easements eat lot).
+//
+// The jurisdiction registry (src/lib/zoning/registry.ts) is consulted first
+// for any strategy that depends on use-class or min-lot rules. When the
+// registry has an authoritative entry for this (state, city, code) we trust
+// it absolutely — no regex fallthrough, no 15,000-sqft generic floor.
+//
+// split_build verdict ladder (when registry returns a min-lot value):
+//   lot ≥ 2× minLot × 1.10 → permitted   (10% buffer for setbacks + access)
+//   lot ≥ 2× minLot        → conditional
+//   otherwise              → not_allowed
+//
+// When the registry returns a density-only district (e.g. Bellevue MDR-2,
+// 30 DU/acre, no per-lot min), we treat it as not_allowed for short plats:
+// the use is multifamily, not a per-lot subdivision strategy.
 export function checkFeasibility(
   property: PropertyData,
   strategy: Strategy
 ): "permitted" | "conditional" | "not_allowed" {
   const lotSize = property.lotSizeSqft;
+  const rule = lookupZoning({
+    state: property.state, city: property.city, code: property.zoningCode,
+  });
+  // Compute the zoning-only verdict first; we then AND it with the hazard
+  // floor at the bottom. Floodway → not_allowed, 100yr / landslide / wetland
+  // → conditional even if zoning is permitted.
+  const hazardFloor = hazardFeasibilityFloor(property.hazards ?? null);
+  const zoningVerdict = ((): "permitted" | "conditional" | "not_allowed" => {
 
   switch (strategy) {
     case "fresh_build":
       return "permitted";
     case "split_build": {
-      const districtMin = estimateDistrictMinLotSqft(property.zoningCode);
+      // Registry: if it says no short plats (density-governed MF zone), block.
+      if (rule && !rule.allowsShortPlat) return "not_allowed";
+      const districtMin = estimateDistrictMinLotSqft(
+        property.zoningCode, property.city, property.state,
+      );
       // Without a known district min, we can't responsibly call this permitted.
       if (!districtMin) {
         // Conservative: only "conditional" when lot is large enough that a split
@@ -591,18 +753,37 @@ export function checkFeasibility(
     case "flip_fix":
       return "permitted";
     case "townhome": {
-      // Townhomes require R-2, RM, or similar attached-housing zoning.
-      // Without a full zoning KB, we approximate: lots ≥6000 sqft in urban zones = conditional.
+      // Registry path: trust the city table when present.
+      if (rule) {
+        if (allowsTownhomes(rule)) return "permitted";
+        // WA HB 1110 overlay: if the city is Tier 1 or Tier 2 and the base
+        // zone is SF, state law REQUIRES attached middle housing be allowed.
+        // Mark as conditional (not permitted) because city implementation
+        // status varies and discretionary design review still applies.
+        const overlay = getMiddleHousingOverlay(property.city, property.state, rule);
+        if (overlay && overlay.maxUnitsPerLot >= 2) return "conditional";
+        return "not_allowed";
+      }
+      // Generic regex fallback for un-registered cities. Note: anchored ^R
+      // so Bellevue "SR-3" / "LDR-2" don't false-match.
       const upper = (property.zoningCode ?? "").toUpperCase();
-      const permittedPatterns = /R-?[2-9]|RM|TH|MF|MU|C[12]/;
+      const permittedPatterns = /^(R-?[2-9]|RM|TH|MF|MU|C[12]|LR[123]|MR|HR)/;
       if (permittedPatterns.test(upper)) return "permitted";
       if (lotSize >= 8000) return "conditional";
       return "not_allowed";
     }
     case "multifamily": {
-      // Multi-family requires higher-density zoning (R-3+, RM, MF, MU).
+      if (rule) {
+        if (allowsMultifamily(rule)) return "permitted";
+        // HB 1110 Tier 1 cities (Seattle / Bellevue / Kirkland / Redmond /
+        // Renton etc.) must allow up to 4 units per residential lot —
+        // qualifies as small multifamily. Conditional pending city compliance.
+        const overlay = getMiddleHousingOverlay(property.city, property.state, rule);
+        if (overlay && overlay.maxUnitsPerLot >= 4 && lotSize >= 4500) return "conditional";
+        return "not_allowed";
+      }
       const upper = (property.zoningCode ?? "").toUpperCase();
-      const permittedPatterns = /R-?[3-9]|RM|MF|MU|C[12]/;
+      const permittedPatterns = /^(R-?[3-9]|RM|MF|MU|C[12]|LR[23]|MR|HR)/;
       if (permittedPatterns.test(upper)) return "permitted";
       if (lotSize >= 12000) return "conditional";
       return "not_allowed";
@@ -610,6 +791,8 @@ export function checkFeasibility(
     default:
       return "not_allowed";
   }
+  })();
+  return combineFeasibility(zoningVerdict, hazardFloor);
 }
 
 // Calculate maximum buildable sqft based on lot and FAR
@@ -1442,35 +1625,55 @@ export function calculateAnalysis(
   // short-plat rules: max lots, geometry, frontage, access easements, critical
   // areas, deed restrictions. The lot-size math is necessary but NOT sufficient.
   if (strategy === "split_build" && feasibility !== "not_allowed") {
-    const districtMin = estimateDistrictMinLotSqft(property.zoningCode);
+    const districtMin = estimateDistrictMinLotSqft(
+      property.zoningCode, property.city, property.state,
+    );
+    const splitRule = lookupZoning({
+      state: property.state, city: property.city, code: property.zoningCode,
+    });
     if (!districtMin) {
       localCaveats.push({
         severity: "warning",
         text:
-          `Zoning code "${property.zoningCode}" not recognized — district minimum lot size cannot be inferred. ` +
-          `Split feasibility is speculative; confirm with city planning department before offering.`,
+          `Zoning code "${property.zoningCode}" not recognized in ${property.city || "this city"} — ` +
+          `district minimum lot size cannot be inferred. Split feasibility is speculative; confirm with city planning department before offering.`,
       });
     } else {
       const required = districtMin * 2;
       const margin = ((property.lotSizeSqft - required) / required) * 100;
+      const sourceLabel = splitRule
+        ? `${splitRule.codeSection}`
+        : `estimated district min of ${districtMin.toLocaleString()} sqft`;
       localCaveats.push({
         severity: feasibility === "conditional" ? "warning" : "info",
         text:
           `Subdivision math: lot ${property.lotSizeSqft.toLocaleString()} sqft vs. required ${required.toLocaleString()} sqft ` +
-          `(2× estimated district min of ${districtMin.toLocaleString()} sqft) — ${margin > 0 ? "+" : ""}${margin.toFixed(0)}% margin. ` +
+          `(2× ${splitRule?.minLotSqft ? splitRule.minLotSqft.toLocaleString() + " sqft per " + sourceLabel : sourceLabel}) — ${margin > 0 ? "+" : ""}${margin.toFixed(0)}% margin. ` +
           `Lot-size math alone doesn't guarantee a short plat will be approved — confirm setback, frontage, access, ` +
           `and critical-area rules with the city.`,
       });
     }
-    // Always add the "needs KB verification" caveat for split until the full
-    // zoning KB is wired up. This is the dominant uncertainty driver.
-    localCaveats.push({
-      severity: "block",
-      text:
-        `Split confidence is conservatively capped at 65 until LandMath's per-city ` +
-        `zoning rulebook is wired (Wave 1). Few WA lots actually qualify for a short plat ` +
-        `even when the lot size math works — verify with a planner before committing capital.`,
-    });
+    // Confidence is conservatively capped for short plats unless the
+    // registry has verified rules for this jurisdiction. With a registry hit
+    // the dominant uncertainty (district min lot) is removed, so we relax
+    // the message but still warn about non-numeric short-plat criteria.
+    if (splitRule) {
+      localCaveats.push({
+        severity: "warning",
+        text:
+          `Minimum lot area is verified against ${splitRule.codeSection}. ` +
+          `Frontage width, access easements, critical-area setbacks, and tree retention rules are NOT yet in LandMath's KB — ` +
+          `confirm those with a city planner before committing capital.`,
+      });
+    } else {
+      localCaveats.push({
+        severity: "block",
+        text:
+          `Split confidence is conservatively capped at 65 until LandMath's per-city ` +
+          `zoning rulebook is wired for ${property.city || "this city"}. Few WA lots actually qualify for a short plat ` +
+          `even when the lot size math works — verify with a planner before committing capital.`,
+      });
+    }
   }
 
   if (guardrails && property.neighborhood) {
@@ -1482,7 +1685,9 @@ export function calculateAnalysis(
     });
     const confidence = computeConfidence({
       zoningKnown: Boolean(property.zoningCode && property.zoningCode !== "Unknown"),
-      zoningRecentlyVerified: false, // flip to true once KB lookup is wired
+      zoningRecentlyVerified: Boolean(lookupZoning({
+        state: property.state, city: property.city, code: property.zoningCode,
+      })),
       lotSizeFromGis: property.lotSizeSqft > 0,
       compsCount: nb.sales.length,
       compsAreRecent,
@@ -1491,13 +1696,45 @@ export function calculateAnalysis(
     confidenceScore = confidence.score;
     confidenceLabel = confidence.label;
 
-    // Hard cap on split_build confidence until the zoning KB is wired.
-    // Even a lot that clears the 2× math should not project "High" confidence
-    // — short plats are gated on city-specific rules we don't yet ingest.
-    if (strategy === "split_build" && confidenceScore !== undefined) {
-      confidenceScore = Math.min(65, confidenceScore);
+    // Hazard penalty: shaves confidence based on KC GIS severity bucket.
+    // Severe → -25, high → -15, moderate → -8, low → -3, clear → 0.
+    const hzPenalty = hazardConfidencePenalty(property.hazards ?? null);
+    if (hzPenalty > 0 && confidenceScore !== undefined) {
+      confidenceScore = Math.max(0, confidenceScore - hzPenalty);
+      // Re-bucket the label after penalty
       confidenceLabel =
-        confidenceScore >= 65
+        confidenceScore >= 85
+          ? "High"
+          : confidenceScore >= 65
+          ? "Moderate"
+          : confidenceScore >= 40
+          ? "Low"
+          : "Speculative";
+      if (property.hazards?.severityLabel === "severe" || property.hazards?.severityLabel === "high") {
+        localCaveats.push({
+          severity: "warning",
+          text:
+            `KC GIS hazard severity: ${property.hazards.severityLabel} (${property.hazards.severityScore}/100). ` +
+            `Confidence reduced by ${hzPenalty} points. See hazard report for the layers that contributed.`,
+        });
+      }
+    }
+
+    // Confidence cap on split_build.
+    //   - Without a registry hit: hard-cap at 65 (the dominant unknown is min
+    //     lot area, which we'd be guessing at).
+    //   - With a registry hit: relax cap to 80 (min lot is verified, but
+    //     frontage/access/critical areas remain non-numeric judgment calls).
+    if (strategy === "split_build" && confidenceScore !== undefined) {
+      const splitRuleForCap = lookupZoning({
+        state: property.state, city: property.city, code: property.zoningCode,
+      });
+      const cap = splitRuleForCap ? 80 : 65;
+      confidenceScore = Math.min(cap, confidenceScore);
+      confidenceLabel =
+        confidenceScore >= 85
+          ? "High"
+          : confidenceScore >= 65
           ? "Moderate"
           : confidenceScore >= 40
           ? "Low"
@@ -1505,6 +1742,43 @@ export function calculateAnalysis(
     }
   }
   void extraCaveats; // reserved for future merges from guardrails
+
+  // ── Sensitivity analysis ──────────────────────────────────────────────────
+  // Re-run the linear cost/sale model under ±200bps rate, ±20% build, ±15%
+  // sale, +6mo timeline. This converts the point estimate above into a
+  // range and surfaces breakeven sale price.
+  const baselineSalePrice = expectedSalePrice;
+  const sensitivity = runSensitivity({
+    strategyLabel: STRATEGIES[strategy]?.label ?? strategy,
+    base: {
+      interestRatePct: financing.interestRate,
+      costPerSqft: effectiveCostPerSqft,
+      salePriceMultiplier: 1,
+      extraMonths: 0,
+    },
+    baselineRun: ({ interestRatePct, costPerSqft: cps, salePriceMultiplier, extraMonths }) => {
+      // Recompute the four moving parts. Everything else is held constant.
+      const scenarioConstruction =
+        buildSqft * cps +
+        (strategy !== "flip_fix" ? 20000 : 0) +
+        (strategy !== "flip_fix" ? buildSqft * cps * 0.05 : 0) +
+        (strategy === "split_build" ? 35000 : strategy === "flip_fix" ? 5000 : 20000) +
+        buildSqft * cps * 0.12 +
+        (strategy !== "flip_fix" ? 25000 : 5000);
+      const scenarioMonthly = calculateMonthlyPayment(
+        loanAmount, interestRatePct, financing.loanTermYears,
+        financing.type === "interest_only",
+      );
+      const scenarioHolding = (scenarioMonthly + monthlyTax + monthlyInsurance + monthlyUtilities) *
+        (timelineMonths + extraMonths);
+      const scenarioSale = baselineSalePrice * salePriceMultiplier;
+      const scenarioSellCosts = scenarioSale * 0.06;
+      const scenarioCash = downPayment + scenarioConstruction + scenarioHolding + closingCosts;
+      const scenarioProfit =
+        scenarioSale - scenarioSellCosts - acquisitionCost - scenarioConstruction - scenarioHolding;
+      return { profit: scenarioProfit, investedCapital: scenarioCash };
+    },
+  });
 
   return {
     id: `${property.id}-${strategy}-${Date.now()}`,
@@ -1539,6 +1813,7 @@ export function calculateAnalysis(
     typologyShare: guardrails?.typologyShare,
     trendBumpApplied: guardrails?.trendBumpApplied,
     safeMaxSqft: guardrails?.size.medianSqft ? guardrails.size.safeMaxSqft : undefined,
+    sensitivity,
   };
 }
 

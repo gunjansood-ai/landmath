@@ -95,6 +95,11 @@ export interface PropertyData {
   lng?: number;
   /** Where the listingPrice came from. Shown in the UI so users can gauge confidence. */
   priceSource?: "apillow_listing" | "apillow_zestimate" | "neighborhood_median" | "appraised" | "estimate";
+  /** King County GIS hazard overlay (flood / landslide / wetland / seismic / etc.).
+   *  Loaded only when isKingCounty=true. Optional for back-compat with persisted state. */
+  hazards?: import("@/lib/hazards/kc-gis").HazardReport | null;
+  /** Sale + permit history for the subject parcel (KC only). */
+  history?: import("@/lib/history/kc-history").PropertyHistory | null;
 }
 
 export interface FinancingConfig {
@@ -141,6 +146,9 @@ export interface AnalysisResult {
   trendBumpApplied?: boolean;
   safeMaxSqft?: number;                 // size guardrail output (when comps allow)
   isTopRecommendation?: boolean;        // true for the top-2 visible cards
+  /** Stress-test results: profit under interest-rate / build-cost / sale-price
+   *  / timeline shocks plus stacked bear/bull cases. */
+  sensitivity?: import("@/lib/sensitivity").SensitivityReport;
 
   // ── Townhome / Multi-family specific (optional — only set for those strategies) ──
   unitCount?: number;

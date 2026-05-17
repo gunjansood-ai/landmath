@@ -11,6 +11,8 @@ import {
   type TypologyBucket,
 } from "@/lib/buildability";
 import { sendAlert } from "@/lib/notify";
+import { fetchKcHazards } from "@/lib/hazards/kc-gis";
+import { fetchKcHistory } from "@/lib/history/kc-history";
 
 /**
  * Aggregated property lookup. Takes lat/lng and returns:
@@ -698,11 +700,24 @@ export async function GET(req: NextRequest) {
         ? `${toTitleCaseAddress(kcStreetAddr)}, ${toTitleCaseAddress(subjectCity)}, WA`
         : null;
 
-    const [assessor, neighborhood, subjectApiillow] = await Promise.all([
+    const [assessor, neighborhood, subjectApiillow, hazards, history] = await Promise.all([
       subjectPin ? getAssessorDetails(subjectPin) : Promise.resolve(null),
       buildNeighborhood(lat, lng, subjectPin, subjectCity, true, "WA"),
       subjectFullAddress
         ? lookupApiillowByAddress(subjectFullAddress)
+        : Promise.resolve(null),
+      // KC GIS hazard overlay — 26 layers queried in parallel. Failures degrade
+      // gracefully; the report always includes a severity bucket + caveats.
+      fetchKcHazards(lat, lng).catch((e) => {
+        console.warn("hazard fetch failed:", e instanceof Error ? e.message : e);
+        return null;
+      }),
+      // Sale + permit history for the subject parcel.
+      subjectPin
+        ? fetchKcHistory(subjectPin).catch((e) => {
+            console.warn("history fetch failed:", e instanceof Error ? e.message : e);
+            return null;
+          })
         : Promise.resolve(null),
     ]);
 
@@ -766,6 +781,8 @@ export async function GET(req: NextRequest) {
       marketEstimate,
       assessor,
       neighborhood,
+      hazards,
+      history,
     });
   }
 
