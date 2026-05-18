@@ -4,19 +4,27 @@ const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 
 export async function GET(req: NextRequest) {
   const placeId = req.nextUrl.searchParams.get("placeId");
+  const address = req.nextUrl.searchParams.get("address");
 
-  if (!placeId) {
-    return NextResponse.json({ error: "placeId required" }, { status: 400 });
+  if (!placeId && !address) {
+    return NextResponse.json({ error: "placeId or address required" }, { status: 400 });
   }
 
   if (!API_KEY) {
     return NextResponse.json({ error: "Google Maps API key not configured" }, { status: 500 });
   }
 
+  // Direct-address path bypasses autocomplete entirely. We use this when the
+  // user types a specific address and we want the literal interpretation —
+  // not Google's best-guess prediction (which on rare street names like
+  // "Upland Rd Medina" can substitute a more common nearby street like
+  // "Midland Road").
+  const url = placeId
+    ? `https://maps.googleapis.com/maps/api/geocode/json?place_id=${encodeURIComponent(placeId)}&key=${API_KEY}`
+    : `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address!)}&key=${API_KEY}`;
+
   try {
-    const res = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?place_id=${encodeURIComponent(placeId)}&key=${API_KEY}`
-    );
+    const res = await fetch(url);
     const data = await res.json();
 
     if (data.status !== "OK" || !data.results?.[0]) {

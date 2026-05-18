@@ -9,6 +9,8 @@ import { formatCurrency } from "@/lib/calculations";
 import {
   getAddressSuggestions,
   geocodePlace,
+  geocodeLiteralAddress,
+  predictionMatchesInput,
   type PlacePrediction,
 } from "@/lib/api/google-places";
 
@@ -70,17 +72,24 @@ export default function Home() {
 
   const analyzeProperty = async (placeId: string, displayAddress: string) => {
     setIsAnalyzing(true);
+    const geo = await geocodePlace(placeId);
+    if (!geo) {
+      alert("Could not geocode that address. Please try again.");
+      setIsAnalyzing(false);
+      return;
+    }
+    await analyzePropertyFromGeo(geo, displayAddress);
+  };
+
+  // Continuation that runs once we have a GeocodedAddress, regardless of
+  // whether it came from placeId-based lookup or literal-address geocoding.
+  const analyzePropertyFromGeo = async (
+    geo: import("@/lib/api/google-places").GeocodedAddress,
+    displayAddress: string = geo.formattedAddress,
+  ) => {
+    setIsAnalyzing(true);
 
     try {
-      // Step 1: Geocode the place to get lat/lng and parsed address
-      const geo = await geocodePlace(placeId);
-
-      if (!geo) {
-        alert("Could not geocode that address. Please try again.");
-        setIsAnalyzing(false);
-        return;
-      }
-
       // Pre-flight condo detection — STRICT signals only. We previously also
       // bailed on `geo.placeTypes.includes("subpremise")`, but Google sometimes
       // tags large single-family homes as subpremise (real example:
@@ -199,30 +208,48 @@ export default function Home() {
     }
   };
 
-  const handleAnalyze = async () => {
-    if (!address.trim()) return;
+  // Analyze the LITERAL typed address (bypasses autocomplete predictions).
+  // Used when Google's autocomplete substitutes a nearby street ("Upland Rd"
+  // → "Midland Rd") and we want the address the user actually typed.
+  const analyzeLiteral = async (typedAddress: string) => {
+    setIsAnalyzing(true);
+    const geo = await geocodeLiteralAddress(typedAddress);
+    if (!geo) {
+      alert("Could not find that exact address. Try adding the ZIP code or city / state.");
+      setIsAnalyzing(false);
+      return;
+    }
+    // Synthesize a placeId-less flow: we already have the lat/lng + parsed
+    // address fields, jump straight to the property lookup.
+    setAddress(geo.formattedAddress);
+    // Reuse analyzeProperty's logic by routing through a placeId-free path
+    // using the geocoded result directly.
+    await analyzePropertyFromGeo(geo);
+  };
 
-    // If we have a selected suggestion, use it
+  const handleAnalyze = async () => {
+    const trimmed = address.trim();
+    if (!trimmed) return;
+
+    // If the user EXPLICITLY selected a suggestion (arrow-keyed or clicked),
+    // trust that choice unconditionally.
     if (suggestions.length > 0 && selectedIndex >= 0) {
       await handleSelectSuggestion(suggestions[selectedIndex]);
       return;
     }
 
-    // If we have suggestions but none selected, use the first one
-    if (suggestions.length > 0) {
+    // Otherwise, validate that the top suggestion's street name actually
+    // matches what they typed. Google's autocomplete will substitute similar
+    // street names ("Upland Rd Medina" → "Midland Rd Medina") on rare
+    // street names — we don't want to silently underwrite the wrong property.
+    if (suggestions.length > 0 && predictionMatchesInput(trimmed, suggestions[0])) {
       await handleSelectSuggestion(suggestions[0]);
       return;
     }
 
-    // Fallback: try fetching suggestions for the current input and use first result
-    setIsAnalyzing(true);
-    const results = await getAddressSuggestions(address, sessionToken);
-    if (results.length > 0) {
-      await handleSelectSuggestion(results[0]);
-    } else {
-      alert("Could not find that address. Please enter a valid US address.");
-      setIsAnalyzing(false);
-    }
+    // No suggestions, or top suggestion looks like a substitution. Fall back
+    // to literal-address geocoding so we underwrite exactly what the user typed.
+    await analyzeLiteral(trimmed);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
