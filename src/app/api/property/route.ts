@@ -309,7 +309,8 @@ async function queryPropertyInfoPoint(
   outFields: string,
   extraParams: Record<string, string> = {}
 ) {
-  const params = new URLSearchParams({
+  // Point query first — fastest path when the lat/lng lands inside a parcel polygon.
+  const pointParams = new URLSearchParams({
     geometry: `${lng},${lat}`,
     geometryType: "esriGeometryPoint",
     inSR: "4326",
@@ -321,7 +322,7 @@ async function queryPropertyInfoPoint(
   });
   let res: Response;
   try {
-    res = await fetch(`${KC_PROPERTY_INFO}/${layerId}/query?${params}`);
+    res = await fetch(`${KC_PROPERTY_INFO}/${layerId}/query?${pointParams}`);
   } catch (err) {
     await sendAlert("⚠️ KC GIS layer " + layerId + " network error: " + (err as Error).message + ". Property data may be unavailable.");
     return [];
@@ -333,7 +334,37 @@ async function queryPropertyInfoPoint(
     return [];
   }
   const data = await res.json();
-  return (data.features ?? []).map((f: PropertyInfoFeature) => f.attributes);
+  const direct = (data.features ?? []).map((f: PropertyInfoFeature) => f.attributes);
+  if (direct.length > 0) return direct;
+
+  // Buffered retry: ~30m envelope around the point. Catches the case where
+  // the geocoded lat/lng lands a few feet outside the parcel polygon (common
+  // for properties with set-back houses, large lots, or coordinate-precision
+  // drift between Google geocoder and KC GIS parcel boundaries). Returns the
+  // nearest parcel by area-weighted intersection.
+  // See: the Medina 304 Upland Rd case where the point query missed but a
+  // 30m envelope found the single-family parcel.
+  const dLat = 30 / 111_111;
+  const dLng = 30 / (111_111 * Math.cos((lat * Math.PI) / 180));
+  const envParams = new URLSearchParams({
+    geometry: [lng - dLng, lat - dLat, lng + dLng, lat + dLat].join(","),
+    geometryType: "esriGeometryEnvelope",
+    inSR: "4326",
+    spatialRel: "esriSpatialRelIntersects",
+    outFields,
+    returnGeometry: "false",
+    resultRecordCount: "1",
+    f: "json",
+    ...extraParams,
+  });
+  try {
+    const res2 = await fetch(`${KC_PROPERTY_INFO}/${layerId}/query?${envParams}`);
+    if (!res2.ok) return [];
+    const data2 = await res2.json();
+    return (data2.features ?? []).map((f: PropertyInfoFeature) => f.attributes);
+  } catch {
+    return [];
+  }
 }
 
 async function queryNearbyParcels(lat: number, lng: number, radiusM: number) {

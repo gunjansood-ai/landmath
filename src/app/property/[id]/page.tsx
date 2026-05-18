@@ -257,7 +257,7 @@ function ExistingStrategyDetail({
   analysis: AnalysisResult;
   isBest: boolean;
   override?: StrategyOverrides;
-  onCommitOverride: (field: "buildSqft" | "sellPricePerSqft", v: number | undefined) => void;
+  onCommitOverride: (field: keyof StrategyOverrides, v: number | undefined) => void;
   onResetOverride: () => void;
   defaultSellPpsf: number;
   defaultSellSource: "neighborhood" | "wa_fallback";
@@ -270,6 +270,17 @@ function ExistingStrategyDetail({
   const [localSellPpsf, setLocalSellPpsf] = useState(
     String(override?.sellPricePerSqft ?? defaultSellPpsf)
   );
+  // Three new editable financial fields. Local state holds the in-progress
+  // input string; on blur/Enter we parse and commit (undefined = "use default").
+  const [localSellingCosts, setLocalSellingCosts] = useState(
+    String(override?.sellingCosts ?? analysis.sellingCosts)
+  );
+  const [localTimeline, setLocalTimeline] = useState(
+    String(override?.timelineMonths ?? analysis.timelineMonths)
+  );
+  const [localHolding, setLocalHolding] = useState(
+    String(override?.holdingCostMonthly ?? analysis.holdingCostMonthly)
+  );
 
   const commitBuild = () => {
     const v = Math.round(Number(localBuildSqft));
@@ -278,6 +289,18 @@ function ExistingStrategyDetail({
   const commitSell = () => {
     const v = Math.round(Number(localSellPpsf));
     onCommitOverride("sellPricePerSqft", v > 0 ? v : undefined);
+  };
+  const commitSellingCosts = () => {
+    const v = Math.round(Number(localSellingCosts));
+    onCommitOverride("sellingCosts", v > 0 ? v : undefined);
+  };
+  const commitTimeline = () => {
+    const v = Math.round(Number(localTimeline));
+    onCommitOverride("timelineMonths", v > 0 ? v : undefined);
+  };
+  const commitHolding = () => {
+    const v = Math.round(Number(localHolding));
+    onCommitOverride("holdingCostMonthly", v > 0 ? v : undefined);
   };
 
   return (
@@ -412,20 +435,91 @@ function ExistingStrategyDetail({
           </div>
         </div>
 
-        {/* Full breakdown */}
+        {/* Full breakdown — three rows are inline-editable.
+            Click the value to set a manual override. Empty/zero = revert to model default. */}
         <div className="mt-4 pt-4 border-t border-gray-100 dark:border-slate-700 space-y-2 text-sm">
-          {[
-            ["Build Area", `${analysis.buildSqft.toLocaleString()} sqft`],
-            ["Acquisition", formatCurrency(analysis.acquisitionCost)],
-            ["Construction", formatCurrency(analysis.constructionCost)],
-            [`Holding (${analysis.timelineMonths}mo)`, formatCurrency(analysis.totalHoldingCost)],
-            ["Selling Costs", formatCurrency(analysis.sellingCosts)],
-          ].map(([label, val]) => (
-            <div key={label} className="flex justify-between text-xs">
-              <span className="text-gray-500">{label}</span>
-              <span className="font-medium text-gray-900 dark:text-white">{val}</span>
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500">Build Area</span>
+            <span className="font-medium text-gray-900 dark:text-white">{analysis.buildSqft.toLocaleString()} sqft</span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500">Acquisition</span>
+            <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.acquisitionCost)}</span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500">Construction</span>
+            <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.constructionCost)}</span>
+          </div>
+
+          {/* Timeline — editable months */}
+          <div className="flex justify-between items-center text-xs group">
+            <span className="text-gray-500 flex items-center gap-1.5">
+              Timeline
+              {override?.timelineMonths != null && (
+                <button onClick={() => { onCommitOverride("timelineMonths", undefined); setLocalTimeline(String(analysis.timelineMonths)); }}
+                  className="text-[9px] text-amber-600 hover:text-red-500 underline">reset</button>
+              )}
+            </span>
+            <div className="flex items-center gap-1">
+              <input
+                type="number" inputMode="numeric"
+                value={localTimeline}
+                onChange={(e) => setLocalTimeline(e.target.value)}
+                onBlur={commitTimeline}
+                onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+                className="w-14 px-1.5 py-0.5 text-xs bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded text-gray-900 dark:text-white text-right font-medium hover:border-blue-400"
+                title="Edit total timeline in months"
+              />
+              <span className="text-[10px] text-gray-400">mo</span>
             </div>
-          ))}
+          </div>
+
+          {/* Holding — editable monthly $, total computed */}
+          <div className="flex justify-between items-center text-xs group">
+            <span className="text-gray-500 flex items-center gap-1.5">
+              Holding (${Math.round(analysis.holdingCostMonthly).toLocaleString()}/mo × {analysis.timelineMonths}mo)
+              {override?.holdingCostMonthly != null && (
+                <button onClick={() => { onCommitOverride("holdingCostMonthly", undefined); setLocalHolding(String(analysis.holdingCostMonthly)); }}
+                  className="text-[9px] text-amber-600 hover:text-red-500 underline">reset</button>
+              )}
+            </span>
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-400">$</span>
+              <input
+                type="number" inputMode="numeric"
+                value={localHolding}
+                onChange={(e) => setLocalHolding(e.target.value)}
+                onBlur={commitHolding}
+                onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+                className="w-20 px-1.5 py-0.5 text-xs bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded text-gray-900 dark:text-white text-right font-medium hover:border-blue-400"
+                title="Edit monthly holding cost"
+              />
+              <span className="text-[10px] text-gray-400">/mo</span>
+            </div>
+          </div>
+
+          {/* Selling Costs — editable flat $ */}
+          <div className="flex justify-between items-center text-xs group">
+            <span className="text-gray-500 flex items-center gap-1.5">
+              Selling Costs
+              {override?.sellingCosts != null && (
+                <button onClick={() => { onCommitOverride("sellingCosts", undefined); setLocalSellingCosts(String(analysis.sellingCosts)); }}
+                  className="text-[9px] text-amber-600 hover:text-red-500 underline">reset</button>
+              )}
+            </span>
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-400">$</span>
+              <input
+                type="number" inputMode="numeric"
+                value={localSellingCosts}
+                onChange={(e) => setLocalSellingCosts(e.target.value)}
+                onBlur={commitSellingCosts}
+                onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+                className="w-24 px-1.5 py-0.5 text-xs bg-white dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded text-gray-900 dark:text-white text-right font-medium hover:border-blue-400"
+                title="Edit total selling costs (commission + tax + concessions + staging)"
+              />
+            </div>
+          </div>
           <div className="flex justify-between text-xs font-bold pt-2 border-t border-gray-100 dark:border-slate-700">
             <span className="text-gray-700 dark:text-gray-300">Total Cost</span>
             <span className="text-gray-900 dark:text-white">{formatCurrency(analysis.totalProjectCost)}</span>

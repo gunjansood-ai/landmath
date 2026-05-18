@@ -1505,10 +1505,16 @@ export function getDefaultBuildSqft(property: PropertyData, strategy: Strategy):
   return Math.round(getMaxBuildableSqft(property, strategy));
 }
 
-// Per-strategy overrides
+// Per-strategy overrides. Anything set here trumps the model's default.
 export interface StrategyOverrides {
   buildSqft?: number;
   sellPricePerSqft?: number;
+  /** Selling cost as a flat dollar amount (overrides commission + excise + concessions + staging). */
+  sellingCosts?: number;
+  /** Total timeline in months (overrides permit + build + sell sum). */
+  timelineMonths?: number;
+  /** Monthly holding cost in dollars (overrides mortgage + tax + ins + HOA + utilities). */
+  holdingCostMonthly?: number;
 }
 
 // Main analysis calculation
@@ -1547,7 +1553,10 @@ export function calculateAnalysis(
     ? buildSqft * overrides.sellPricePerSqft
     : estimateSalePrice(property, strategy, tier, buildSqft);
   const sellMonths = Math.ceil(getSellMonths(tier, expectedSalePrice));
-  const timelineMonths = permitMonths + buildMonths + sellMonths;
+  // Timeline override: when user pins a total, distribute proportionally so
+  // the permit/build/sell breakdown still makes sense for the progress bar.
+  const defaultTimeline = permitMonths + buildMonths + sellMonths;
+  const timelineMonths = overrides?.timelineMonths ?? defaultTimeline;
 
   // Acquisition costs
   const purchasePrice = property.listingPrice;
@@ -1581,16 +1590,22 @@ export function calculateAnalysis(
   const monthlyInsurance = (purchasePrice * 0.004) / 12; // ~0.4% annually
   const monthlyHoa = property.hoaMonthly || 0;
   const monthlyUtilities = 300;
+  // Holding-cost override: caller pins the monthly amount. Total still
+  // multiplies by the (possibly overridden) timeline so the two are coherent.
   const holdingCostMonthly =
+    overrides?.holdingCostMonthly ??
     monthlyMortgage + monthlyTax + monthlyInsurance + monthlyHoa + monthlyUtilities;
   const totalHoldingCost = holdingCostMonthly * timelineMonths;
 
-  // Selling costs
+  // Selling costs. Default = 5% commission + 1.8% WA excise + 1% concessions
+  // + flat staging. Override = pin the dollar amount directly.
   const agentCommission = expectedSalePrice * 0.05;
   const exciseTax = expectedSalePrice * 0.018; // WA excise tax ~1.8%
   const sellerConcessions = expectedSalePrice * 0.01;
   const stagingCosts = strategy !== "flip_fix" ? 5000 : 3000;
-  const sellingCosts = agentCommission + exciseTax + sellerConcessions + stagingCosts;
+  const sellingCosts =
+    overrides?.sellingCosts ??
+    (agentCommission + exciseTax + sellerConcessions + stagingCosts);
 
   // Totals
   const totalProjectCost = acquisitionCost + constructionCost + totalHoldingCost + sellingCosts;

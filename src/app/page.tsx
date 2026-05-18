@@ -81,13 +81,16 @@ export default function Home() {
         return;
       }
 
-      // Condo/unit detection — skip these, they don't work for land/build analysis
-      const isCondo =
-        !!geo.unit || // has apt/unit number
-        geo.placeTypes?.includes("subpremise") ||
-        /\b(apt|unit|suite|ste|#)\b/i.test(displayAddress);
+      // Pre-flight condo detection — STRICT signals only. We previously also
+      // bailed on `geo.placeTypes.includes("subpremise")`, but Google sometimes
+      // tags large single-family homes as subpremise (real example:
+      // 304 Upland Rd, Medina). KC GIS is authoritative; let the property
+      // lookup run and we'll re-check below with KC's classification.
+      const strictlyAUnit =
+        !!geo.unit || // Google parsed an explicit unit number from the address
+        /\b(apt|unit|suite|ste|#\s*\d)\b/i.test(displayAddress); // explicit text in address
 
-      if (isCondo) {
+      if (strictlyAUnit) {
         alert(
           "This looks like a condo or apartment unit. LandMath is designed for houses and land — condo analysis isn't supported yet."
         );
@@ -113,8 +116,17 @@ export default function Home() {
           ? propertyData.priceSource
           : "estimate";
 
-      // Server-side present use check — skip non-residential
-      if (parcel?.presentUse) {
+      // Server-side present use check — skip non-residential.
+      //
+      // IMPORTANT: only trust this classification when it came from King
+      // County GIS (the authoritative source, with field PREUSE_DESC). When
+      // it came from APIllow's `property_type` (the non-KC fallback path),
+      // we ignore it — APIllow frequently mislabels luxury single-family
+      // homes as "Condo" (real example: 304 Upland Rd, Medina). Blocking on
+      // a wrong third-party label would lock the user out of analyzing a
+      // legitimate SFR.
+      const isAuthoritative = propertyData.isKingCounty === true;
+      if (isAuthoritative && parcel?.presentUse) {
         const use = parcel.presentUse.toLowerCase();
         const nonResidential =
           use.includes("condo") ||
@@ -126,7 +138,7 @@ export default function Home() {
           use.includes("parking");
         if (nonResidential) {
           alert(
-            `This property is classified as "${parcel.presentUse}". LandMath is designed for single-family residential and land — this use type isn't supported.`
+            `This property is classified as "${parcel.presentUse}" per King County. LandMath is designed for single-family residential and land — this use type isn't supported.`
           );
           setIsAnalyzing(false);
           return;
