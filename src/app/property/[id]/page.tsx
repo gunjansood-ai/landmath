@@ -447,9 +447,47 @@ function ExistingStrategyDetail({
             <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.acquisitionCost)}</span>
           </div>
           <div className="flex justify-between text-xs">
-            <span className="text-gray-500">Construction</span>
+            <span className="text-gray-500">
+              {analysis.strategy === "flip_fix" ? "Renovation" : "Construction"}
+            </span>
             <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(analysis.constructionCost)}</span>
           </div>
+          {/* Itemized renovation breakdown — flip_fix only */}
+          {analysis.strategy === "flip_fix" && analysis.flipRenovationBreakdown && (() => {
+            const b = analysis.flipRenovationBreakdown;
+            return (
+              <div className="ml-3 space-y-1 border-l-2 border-gray-100 dark:border-slate-700 pl-3">
+                <div className="flex justify-between text-[10px] text-gray-400">
+                  <span>Flooring &amp; paint ({analysis.buildSqft.toLocaleString()} sqft)</span>
+                  <span>{formatCurrency(b.flooringPaintCost)}</span>
+                </div>
+                {b.largeBaths > 0 && (
+                  <div className="flex justify-between text-[10px] text-gray-400">
+                    <span>{b.largeBaths} large bath{b.largeBaths !== 1 ? "s" : ""}</span>
+                    <span>{formatCurrency(b.largeBathroomCost)}</span>
+                  </div>
+                )}
+                {b.smallBaths > 0 && (
+                  <div className="flex justify-between text-[10px] text-gray-400">
+                    <span>{b.smallBaths} small bath{b.smallBaths !== 1 ? "s" : ""}</span>
+                    <span>{formatCurrency(b.smallBathroomCost)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-[10px] text-gray-400">
+                  <span>Kitchen</span>
+                  <span>{formatCurrency(b.kitchenCost)}</span>
+                </div>
+                <div className="flex justify-between text-[10px] text-gray-400">
+                  <span>Landscaping</span>
+                  <span>{formatCurrency(b.landscapingCost)}</span>
+                </div>
+                <div className="flex justify-between text-[10px] text-gray-400 border-t border-gray-100 dark:border-slate-700 pt-1 mt-1">
+                  <span>+ permit &amp; contingency (12%)</span>
+                  <span>{formatCurrency(analysis.constructionCost - b.baseRenovationCost)}</span>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Timeline — editable months */}
           <div className="flex justify-between items-center text-xs group">

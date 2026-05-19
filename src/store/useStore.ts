@@ -172,6 +172,8 @@ export interface AnalysisResult {
   trendBumpApplied?: boolean;
   safeMaxSqft?: number;                 // size guardrail output (when comps allow)
   isTopRecommendation?: boolean;        // true for the top-2 visible cards
+  /** Itemized renovation cost breakdown for flip_fix strategy. */
+  flipRenovationBreakdown?: import("@/lib/calculations").FlipRenovationBreakdown;
   /** Stress-test results: profit under interest-rate / build-cost / sale-price
    *  / timeline shocks plus stacked bear/bull cases. */
   sensitivity?: import("@/lib/sensitivity").SensitivityReport;

@@ -1450,22 +1450,103 @@ export function getDefaultSellPricePerSqft(
 
 // ─── Strategy-specific construction cost ────────────────────────────────────
 //
-// Fix-n-upper renovation is fundamentally cheaper per sqft than new construction
-// — we're touching finishes/systems, not pouring foundation. WA renovation
-// typically runs $100–250/sqft depending on quality, vs new construction
-// $220–650/sqft.
+// ── Fix-up renovation cost (itemized formula) ─────────────────────────────────
 //
-// Formula: max($100 floor, tier_new_cost × 0.40). Premium/luxury reno scales
-// with tier (better finishes cost more), but always at ~40% of new-construction
-// cost for the same tier.
+// Total Cost = (sqft × flooring+paint $/sqft)
+//            + (small bathrooms × small bath cost)
+//            + (large bathrooms × large bath cost)
+//            + kitchen cost
+//            + landscaping cost
+//
+// Mid-range (standard tier):  flooring $25/sqft, small bath $10K,
+//   large bath $15K, kitchen $25K, landscaping $10K
+// High-end (premium tier):    flooring $35/sqft, small bath $15K,
+//   large bath $25K, kitchen $40K, landscaping $25K
+// Luxury (luxury tier):       ~1.4× high-end for premium finishes
 
-const FLIP_COST_FLOOR_PER_SQFT = 100;
-const FLIP_COST_RATIO = 0.40;
+export interface FlipRenovationBreakdown {
+  smallBaths: number;
+  largeBaths: number;
+  flooringPaintCost: number;
+  smallBathroomCost: number;
+  largeBathroomCost: number;
+  kitchenCost: number;
+  landscapingCost: number;
+  baseRenovationCost: number; // sum before permit + contingency
+}
+
+const FLIP_COSTS: Record<QualityTier, {
+  flooringPaintPerSqft: number;
+  smallBathroom: number;
+  largeBathroom: number;
+  kitchen: number;
+  landscaping: number;
+}> = {
+  standard: {
+    flooringPaintPerSqft: 25,
+    smallBathroom: 10_000,
+    largeBathroom: 15_000,
+    kitchen: 25_000,
+    landscaping: 10_000,
+  },
+  premium: {
+    flooringPaintPerSqft: 35,
+    smallBathroom: 15_000,
+    largeBathroom: 25_000,
+    kitchen: 40_000,
+    landscaping: 25_000,
+  },
+  luxury: {
+    flooringPaintPerSqft: 50,
+    smallBathroom: 20_000,
+    largeBathroom: 35_000,
+    kitchen: 60_000,
+    landscaping: 40_000,
+  },
+  ultra_luxury: {
+    flooringPaintPerSqft: 75,
+    smallBathroom: 30_000,
+    largeBathroom: 50_000,
+    kitchen: 85_000,
+    landscaping: 60_000,
+  },
+};
+
+/**
+ * Split total baths into small (powder/half) and large (full) bathrooms.
+ * Rule: roughly half are large (master + hall bath), remainder are small.
+ */
+function splitBathrooms(baths: number): { small: number; large: number } {
+  const large = Math.max(1, Math.floor(baths / 2));
+  const small = Math.max(0, Math.floor(baths - large));
+  return { large, small };
+}
+
+export function getFlipRenovationBreakdown(
+  sqft: number,
+  baths: number,
+  tier: QualityTier
+): FlipRenovationBreakdown {
+  const costs = FLIP_COSTS[tier];
+  const { small: smallBaths, large: largeBaths } = splitBathrooms(baths);
+
+  const flooringPaintCost  = Math.round(sqft * costs.flooringPaintPerSqft);
+  const smallBathroomCost  = smallBaths * costs.smallBathroom;
+  const largeBathroomCost  = largeBaths * costs.largeBathroom;
+  const kitchenCost        = costs.kitchen;
+  const landscapingCost    = costs.landscaping;
+  const baseRenovationCost =
+    flooringPaintCost + smallBathroomCost + largeBathroomCost + kitchenCost + landscapingCost;
+
+  return {
+    smallBaths, largeBaths,
+    flooringPaintCost, smallBathroomCost, largeBathroomCost,
+    kitchenCost, landscapingCost, baseRenovationCost,
+  };
+}
 
 export function getEffectiveCostPerSqft(strategy: Strategy, tierCostPerSqft: number): number {
-  if (strategy === "flip_fix") {
-    return Math.max(FLIP_COST_FLOOR_PER_SQFT, Math.round(tierCostPerSqft * FLIP_COST_RATIO));
-  }
+  // flip_fix now uses getFlipRenovationBreakdown — this function is for all other strategies.
   return tierCostPerSqft;
 }
 
@@ -1559,34 +1640,72 @@ export function calculateAnalysis(
   const defaultTimeline = permitMonths + buildMonths + sellMonths;
   const timelineMonths = overrides?.timelineMonths ?? defaultTimeline;
 
-  // Acquisition costs
+  // Acquisition costs.
+  //
+  // Acquisition-loan model by financing.type:
+  //   - "cash"          → loan = 0, down = 100% (overrides downPaymentPct)
+  //   - "hard_money"    → loan = purchase × (1 - down%), interest-only
+  //                       at financing.interestRate, term = project timeline
+  //                       (balloons at sale from proceeds). Points charged
+  //                       upfront as origination.
+  //   - "interest_only" → loan = purchase × (1 - down%), IO at rate, no term
+  //   - "traditional"   → standard 30-yr P&I amortization
+  //
+  // Origination points (`financing.points`) are deducted as an upfront cost
+  // from cash equity for ANY type where points > 0 (typically hard money).
   const purchasePrice = property.listingPrice;
   const closingCosts = purchasePrice * 0.025; // 2.5%
-  const downPayment = purchasePrice * (financing.downPaymentPct / 100);
-  const loanAmount = purchasePrice - downPayment;
-  const acquisitionCost = purchasePrice + closingCosts;
+  const isAllCash = financing.type === "cash";
+  const effectiveDownPct = isAllCash ? 100 : financing.downPaymentPct;
+  const downPayment = purchasePrice * (effectiveDownPct / 100);
+  const loanAmount = isAllCash ? 0 : purchasePrice - downPayment;
+  const acquisitionOriginationFees =
+    loanAmount > 0 && financing.points > 0
+      ? loanAmount * (financing.points / 100)
+      : 0;
+  const acquisitionCost = purchasePrice + closingCosts + acquisitionOriginationFees;
 
-  // Construction costs — use effective cost per sqft (renovation rate for flip_fix).
+  // Construction costs
   const demolitionCost = strategy !== "flip_fix" ? 20000 : 0;
-  const architectFees = strategy !== "flip_fix" ? buildSqft * effectiveCostPerSqft * 0.05 : 0;
-  const permitFees = strategy === "split_build" ? 35000 : strategy === "flip_fix" ? 5000 : 20000;
-  const contingency = buildSqft * effectiveCostPerSqft * 0.12;
-  const landscaping = strategy !== "flip_fix" ? 25000 : 5000;
-  const constructionCost =
-    buildSqft * effectiveCostPerSqft +
-    demolitionCost +
-    architectFees +
-    permitFees +
-    contingency +
-    landscaping;
+  const architectFees  = strategy !== "flip_fix" ? buildSqft * effectiveCostPerSqft * 0.05 : 0;
+  const permitFees     = strategy === "split_build" ? 35000 : strategy === "flip_fix" ? 5000 : 20000;
+
+  // flip_fix: itemized renovation formula (flooring+paint, baths, kitchen, landscaping)
+  // All other strategies: flat $/sqft model.
+  let constructionCost: number;
+  let flipRenovationBreakdown: FlipRenovationBreakdown | undefined;
+
+  if (strategy === "flip_fix") {
+    flipRenovationBreakdown = getFlipRenovationBreakdown(buildSqft, property.baths, tier);
+    const contingency = Math.round(flipRenovationBreakdown.baseRenovationCost * 0.12);
+    constructionCost =
+      flipRenovationBreakdown.baseRenovationCost + permitFees + contingency;
+  } else {
+    const contingency = buildSqft * effectiveCostPerSqft * 0.12;
+    const landscaping = 25000;
+    constructionCost =
+      buildSqft * effectiveCostPerSqft +
+      demolitionCost +
+      architectFees +
+      permitFees +
+      contingency +
+      landscaping;
+  }
 
   // Monthly fixed holding costs — paid every month regardless of construction phase.
-  const monthlyMortgage = calculateMonthlyPayment(
-    loanAmount,
-    financing.interestRate,
-    financing.loanTermYears,
-    financing.type === "interest_only"
-  );
+  //
+  // Cash and hard-money both treat the loan as interest-only (cash: trivially
+  // zero; hard money: short-term IO balloon). Only "traditional" amortizes.
+  const isInterestOnly =
+    financing.type === "interest_only" || financing.type === "hard_money";
+  const monthlyMortgage = isAllCash
+    ? 0
+    : calculateMonthlyPayment(
+        loanAmount,
+        financing.interestRate,
+        financing.loanTermYears,
+        isInterestOnly,
+      );
   const monthlyTax = property.annualPropertyTax / 12;
   const monthlyInsurance = (purchasePrice * 0.004) / 12; // ~0.4% annually
   const monthlyHoa = property.hoaMonthly || 0;
@@ -1814,6 +1933,7 @@ export function calculateAnalysis(
     base: {
       interestRatePct: financing.interestRate,
       costPerSqft: effectiveCostPerSqft,
+      constructionRatePct: financing.constructionRate ?? 10,
       salePriceMultiplier: 1,
       extraMonths: 0,
     },
@@ -1852,6 +1972,7 @@ export function calculateAnalysis(
     financing,
     acquisitionCost: Math.round(acquisitionCost),
     constructionCost: Math.round(constructionCost),
+    flipRenovationBreakdown,
     holdingCostMonthly: Math.round(holdingCostMonthly),
     totalHoldingCost: Math.round(totalHoldingCost),
     sellingCosts: Math.round(sellingCosts),
@@ -2086,14 +2207,22 @@ export function calculateTownhomeAnalysis(
     sharedInfraCost;
 
   // ── Holding costs ─────────────────────────────────────────────────────────
-  const downPayment = purchasePrice * (financing.downPaymentPct / 100);
-  const loanAmount = purchasePrice - downPayment;
-  const monthlyMortgage = calculateMonthlyPayment(
-    loanAmount,
-    financing.interestRate,
-    financing.loanTermYears,
-    financing.type === "interest_only"
-  );
+  // Same financing semantics as the fresh_build path:
+  //   cash → loan=0, hard money → IO, traditional → amortizing.
+  const isAllCash = financing.type === "cash";
+  const isInterestOnly =
+    financing.type === "interest_only" || financing.type === "hard_money";
+  const effectiveDownPct = isAllCash ? 100 : financing.downPaymentPct;
+  const downPayment = purchasePrice * (effectiveDownPct / 100);
+  const loanAmount = isAllCash ? 0 : purchasePrice - downPayment;
+  const monthlyMortgage = isAllCash
+    ? 0
+    : calculateMonthlyPayment(
+        loanAmount,
+        financing.interestRate,
+        financing.loanTermYears,
+        isInterestOnly,
+      );
   const holdingCostMonthly =
     monthlyMortgage +
     property.annualPropertyTax / 12 +
@@ -2237,14 +2366,22 @@ export function calculateMultiFamilyAnalysis(
     landscaping;
 
   // ── Holding costs ─────────────────────────────────────────────────────────
-  const downPayment = purchasePrice * (financing.downPaymentPct / 100);
-  const loanAmount = purchasePrice - downPayment;
-  const monthlyMortgage = calculateMonthlyPayment(
-    loanAmount,
-    financing.interestRate,
-    financing.loanTermYears,
-    financing.type === "interest_only"
-  );
+  // Same financing semantics as the fresh_build path:
+  //   cash → loan=0, hard money → IO, traditional → amortizing.
+  const isAllCash = financing.type === "cash";
+  const isInterestOnly =
+    financing.type === "interest_only" || financing.type === "hard_money";
+  const effectiveDownPct = isAllCash ? 100 : financing.downPaymentPct;
+  const downPayment = purchasePrice * (effectiveDownPct / 100);
+  const loanAmount = isAllCash ? 0 : purchasePrice - downPayment;
+  const monthlyMortgage = isAllCash
+    ? 0
+    : calculateMonthlyPayment(
+        loanAmount,
+        financing.interestRate,
+        financing.loanTermYears,
+        isInterestOnly,
+      );
   const holdingCostMonthly =
     monthlyMortgage +
     property.annualPropertyTax / 12 +
