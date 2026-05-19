@@ -1937,8 +1937,8 @@ export function calculateAnalysis(
       salePriceMultiplier: 1,
       extraMonths: 0,
     },
-    baselineRun: ({ interestRatePct, costPerSqft: cps, salePriceMultiplier, extraMonths }) => {
-      // Recompute the four moving parts. Everything else is held constant.
+    baselineRun: ({ interestRatePct, constructionRatePct, costPerSqft: cps, salePriceMultiplier, extraMonths }) => {
+      // Recompute everything that moves under stress.
       const scenarioConstruction =
         buildSqft * cps +
         (strategy !== "flip_fix" ? 20000 : 0) +
@@ -1946,15 +1946,41 @@ export function calculateAnalysis(
         (strategy === "split_build" ? 35000 : strategy === "flip_fix" ? 5000 : 20000) +
         buildSqft * cps * 0.12 +
         (strategy !== "flip_fix" ? 25000 : 5000);
-      const scenarioMonthly = calculateMonthlyPayment(
-        loanAmount, interestRatePct, financing.loanTermYears,
-        financing.type === "interest_only",
-      );
-      const scenarioHolding = (scenarioMonthly + monthlyTax + monthlyInsurance + monthlyUtilities) *
-        (timelineMonths + extraMonths);
+      // Acquisition mortgage under stress — honor cash + hard-money flags.
+      const scenarioMonthly = isAllCash
+        ? 0
+        : calculateMonthlyPayment(
+            loanAmount, interestRatePct, financing.loanTermYears,
+            isInterestOnly,
+          );
+      // Re-run the construction draw schedule with the stressed rate so the
+      // construction-loan interest line responds. Hard-money pricing is
+      // volatile (often follows prime + spread); a 200-bp shock here is
+      // realistic and was previously ignored.
+      const scenarioDraw = computeDrawSchedule({
+        constructionCost: scenarioConstruction,
+        permitMonths,
+        buildMonths: buildMonths + Math.round(extraMonths / 2),
+        sellMonths: sellMonths + Math.round(extraMonths / 2),
+        constructionLtcPct: ltc,
+        constructionRate: constructionRatePct,
+        constructionPoints: constPoints,
+        upfrontEquity: downPayment + closingCosts + acquisitionOriginationFees,
+        acquisitionLoanBalance: loanAmount,
+        acquisitionMonthlyPayment: scenarioMonthly,
+      });
+      const T = timelineMonths + extraMonths;
+      const scenarioHolding =
+        scenarioMonthly * T +
+        scenarioDraw.totalConstructionInterest +
+        (monthlyTax + monthlyInsurance + monthlyHoa + monthlyUtilities) * T +
+        scenarioDraw.originationFees;
       const scenarioSale = baselineSalePrice * salePriceMultiplier;
-      const scenarioSellCosts = scenarioSale * 0.06;
-      const scenarioCash = downPayment + scenarioConstruction + scenarioHolding + closingCosts;
+      const scenarioSellCosts = scenarioSale * 0.078; // 5% commission + 1.8% WA REET + 1% concessions
+      const scenarioCash =
+        scenarioDraw.weightedAvgCashDeployed > 0
+          ? scenarioDraw.weightedAvgCashDeployed
+          : downPayment + scenarioConstruction + scenarioHolding + closingCosts;
       const scenarioProfit =
         scenarioSale - scenarioSellCosts - acquisitionCost - scenarioConstruction - scenarioHolding;
       return { profit: scenarioProfit, investedCapital: scenarioCash };

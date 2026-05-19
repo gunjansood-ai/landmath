@@ -17,8 +17,12 @@
  */
 
 export interface ScenarioInputs {
-  /** Annual loan interest rate (percent, e.g. 7.5 for 7.5%). */
+  /** Annual ACQUISITION mortgage interest rate (percent, e.g. 7.5 for 7.5%). */
   interestRatePct: number;
+  /** Annual CONSTRUCTION loan interest rate (percent). Separate axis — hard
+   *  money construction rates move with the cycle but on different timing
+   *  than purchase mortgages. */
+  constructionRatePct: number;
   /** Per-sqft construction cost. */
   costPerSqft: number;
   /** Multiplier on baseline sale price (1.0 = no change, 0.85 = -15%). */
@@ -68,14 +72,19 @@ const SCENARIOS: Array<{
   delta: (b: ScenarioInputs) => ScenarioInputs;
 }> = [
   {
-    label: "Rate +200 bps",
-    description: "Mortgage rate rises 2 percentage points — typical Fed-cycle move.",
+    label: "Mortgage rate +200 bps",
+    description: "Acquisition mortgage rate rises 2 pp — typical Fed-cycle move.",
     delta: (b) => ({ ...b, interestRatePct: b.interestRatePct + 2 }),
   },
   {
-    label: "Rate -100 bps",
-    description: "Rate eases by 1 point — favorable refi window mid-build.",
+    label: "Mortgage rate -100 bps",
+    description: "Acquisition rate eases by 1 pp — favorable refi window mid-build.",
     delta: (b) => ({ ...b, interestRatePct: Math.max(0, b.interestRatePct - 1) }),
+  },
+  {
+    label: "Construction rate +200 bps",
+    description: "Construction loan rate jumps 2 pp (hard money + spread). Stresses the draw-balance interest.",
+    delta: (b) => ({ ...b, constructionRatePct: b.constructionRatePct + 2 }),
   },
   {
     label: "Build cost +20%",
@@ -129,9 +138,10 @@ export function runSensitivity(args: {
   // Bear: every adverse move stacked.
   const bear = score(
     "Bear case",
-    "All adverse moves stacked: rate +200 bps, build +20%, sale -15%, timeline +6 mo.",
+    "All adverse moves stacked: mortgage rate +200 bps, construction rate +200 bps, build +20%, sale −15%, timeline +6 mo.",
     {
       interestRatePct: base.interestRatePct + 2,
+      constructionRatePct: base.constructionRatePct + 2,
       costPerSqft: base.costPerSqft * 1.2,
       salePriceMultiplier: base.salePriceMultiplier * 0.85,
       extraMonths: base.extraMonths + 6,
@@ -141,9 +151,10 @@ export function runSensitivity(args: {
   // Bull: every favorable move stacked.
   const bull = score(
     "Bull case",
-    "Favorable moves stacked: rate -100 bps, build -10%, sale +10%, on-time.",
+    "Favorable moves stacked: mortgage rate −100 bps, construction rate −100 bps, build −10%, sale +10%, on-time.",
     {
       interestRatePct: Math.max(0, base.interestRatePct - 1),
+      constructionRatePct: Math.max(0, base.constructionRatePct - 1),
       costPerSqft: base.costPerSqft * 0.9,
       salePriceMultiplier: base.salePriceMultiplier * 1.10,
       extraMonths: 0,

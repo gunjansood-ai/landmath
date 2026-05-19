@@ -1352,7 +1352,31 @@ export default function PropertyAnalysis() {
               <label className="text-xs font-semibold text-gray-600 dark:text-gray-400 mb-2 block">Financing</label>
               <div className="flex gap-1 bg-gray-100 dark:bg-slate-700 p-1 rounded-xl mb-2">
                 {(["traditional", "interest_only", "hard_money", "cash"] as const).map((ft) => (
-                  <button key={ft} onClick={() => setFinancing({ ...financing, type: ft })}
+                  <button key={ft} onClick={() => {
+                    // Auto-snap related fields when switching modes so the
+                    // numbers reflect what the chip actually means:
+                    //   Cash      → 100% down, 0 loan, 0 rate
+                    //   Hard $    → 20% down, 10% rate, 2 pts (typical hard-money terms)
+                    //   IO / 30yr → keep current down/rate/points
+                    const next: typeof financing = (() => {
+                      if (ft === "cash") {
+                        return { ...financing, type: ft, downPaymentPct: 100, points: 0 };
+                      }
+                      if (ft === "hard_money") {
+                        return {
+                          ...financing, type: ft,
+                          downPaymentPct: financing.downPaymentPct === 100 ? 20 : financing.downPaymentPct,
+                          interestRate: financing.interestRate < 8 ? 10 : financing.interestRate,
+                          points: financing.points === 0 ? 2 : financing.points,
+                        };
+                      }
+                      return {
+                        ...financing, type: ft,
+                        downPaymentPct: financing.downPaymentPct === 100 ? 20 : financing.downPaymentPct,
+                      };
+                    })();
+                    setFinancing(next);
+                  }}
                     className={`flex-1 px-1 py-1.5 rounded-lg text-xs font-medium transition-all ${
                       financing.type === ft ? "bg-white dark:bg-slate-600 text-gray-900 dark:text-white shadow-sm" : "text-gray-500 hover:text-gray-700"
                     }`}>
@@ -1377,7 +1401,26 @@ export default function PropertyAnalysis() {
                     <span className="text-[11px] text-gray-400">%</span>
                   </div>
                 )}
+                {/* Points field — visible for hard money + IO since both can
+                    have origination fees. One point = 1% of loan size, paid
+                    upfront at closing, added to acquisitionCost. */}
+                {(financing.type === "hard_money" || financing.type === "interest_only") && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-gray-500">Pts:</span>
+                    <input type="number" step="0.25" min="0" value={financing.points}
+                      onChange={(e) => setFinancing({ ...financing, points: Number(e.target.value) })}
+                      className="w-14 px-2 py-1 text-xs bg-gray-50 dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white" />
+                    <span className="text-[11px] text-gray-400">% upfront</span>
+                  </div>
+                )}
               </div>
+              {/* Mode hint */}
+              <p className="text-[10px] text-gray-400 leading-snug mt-1.5">
+                {financing.type === "cash" && "All cash — no acquisition loan, no monthly mortgage."}
+                {financing.type === "hard_money" && "Hard money — interest-only on the loan balance, balloons at sale. Points charged upfront."}
+                {financing.type === "interest_only" && "Interest-only — no principal paydown during the project."}
+                {financing.type === "traditional" && "30-yr amortizing — principal + interest each month."}
+              </p>
             </div>
           </div>
 

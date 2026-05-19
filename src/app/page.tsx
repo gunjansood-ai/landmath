@@ -540,14 +540,8 @@ function estimateValue(city: string, sqft: number): number {
   return Math.round(ppsf * sqft);
 }
 
-function estimateTax(assessedValue: number, county: string): number {
-  // WA property tax rates by county (approximate)
-  const rates: Record<string, number> = {
-    King: 0.0092,
-    Pierce: 0.0112,
-    Snohomish: 0.0098,
-    Kitsap: 0.0105,
-  };
-  const rate = rates[county] || 0.01;
-  return Math.round(assessedValue * rate);
+function estimateTax(assessedValue: number, _county: string): number {
+  // WA property tax — 1% of assessed value, flat. Earlier per-county
+  // heuristic was overstating; user-verified ~1% as the right average.
+  return Math.round(assessedValue * 0.01);
 }
