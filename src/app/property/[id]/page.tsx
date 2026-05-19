@@ -960,6 +960,62 @@ function AskPriceChip({
   );
 }
 
+// ─── Price cross-check chip ──────────────────────────────────────────────────
+//
+// Shows the three independent price signals side-by-side: current Zestimate,
+// last sold price+date, and a "verify on Redfin" deep link. Helps the user
+// catch APIllow data errors (e.g. when their "current list price" is actually
+// the last sold price).
+function PriceCrossCheckChip({ property }: { property: PropertyData }) {
+  const z = property.subjectZestimate;
+  const last = property.subjectLastSoldPrice;
+  const listed = property.subjectListDate;
+  const addrForUrl = encodeURIComponent(`${property.address}, ${property.city}, ${property.state} ${property.zip}`);
+  const redfinUrl = `https://www.redfin.com/zipcode/${property.zip}/filter/property-type=house?query=${addrForUrl}`;
+  const zillowUrl = `https://www.zillow.com/homes/${addrForUrl}_rb/`;
+
+  // If we have nothing to cross-check, still show the verify links so the
+  // user can confirm the headline price.
+  const fmtK = (n: number) => `$${Math.round(n / 1000).toLocaleString()}K`;
+  const daysSince = (iso: string | null | undefined) => {
+    if (!iso) return null;
+    const t = Date.parse(iso);
+    if (isNaN(t)) return null;
+    const days = Math.round((Date.now() - t) / (24 * 60 * 60 * 1000));
+    if (days < 0) return null;
+    if (days < 60) return `${days}d ago`;
+    if (days < 365) return `${Math.round(days / 30)}mo ago`;
+    return `${(days / 365).toFixed(1)}yr ago`;
+  };
+
+  return (
+    <div className="flex-shrink-0 bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-xl px-3 py-2">
+      <p className="text-[10px] text-gray-400 leading-none mb-1">Cross-check</p>
+      <div className="flex flex-col gap-0.5 text-[11px] leading-tight">
+        {listed && (
+          <span className="text-gray-600 dark:text-gray-300">Listed {daysSince(listed) || listed}</span>
+        )}
+        {z != null && z > 0 && (
+          <span className="text-blue-600 dark:text-blue-400">Zest {fmtK(z)}</span>
+        )}
+        {last != null && last > 0 && (
+          <span className="text-amber-600 dark:text-amber-400">Last sold {fmtK(last)}</span>
+        )}
+        <div className="flex gap-2 mt-0.5">
+          <a href={redfinUrl} target="_blank" rel="noopener noreferrer"
+            className="inline-flex items-center gap-0.5 text-[10px] text-red-500 hover:text-red-700 underline">
+            Redfin <ExternalLink size={9} />
+          </a>
+          <a href={zillowUrl} target="_blank" rel="noopener noreferrer"
+            className="inline-flex items-center gap-0.5 text-[10px] text-blue-500 hover:text-blue-700 underline">
+            Zillow <ExternalLink size={9} />
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Accordion wrapper ────────────────────────────────────────────────────────
 
 function Accordion({ label, defaultOpen = false, children }: { label: string; defaultOpen?: boolean; children: React.ReactNode }) {
@@ -1194,6 +1250,12 @@ export default function PropertyAnalysis() {
             override={listPriceOverride}
             onOverride={setListPriceOverride}
           />
+          {/* Cross-check signals — surface Zestimate, last-sold, list date, and
+              a "verify on Redfin" link right next to the editable price so the
+              user can sanity-check before underwriting. Especially important
+              when APIllow returns a stale or wrong number (e.g. last-sold price
+              instead of current list). */}
+          <PriceCrossCheckChip property={property} />
           {[
             { label: "Lot", value: `${property.lotSizeSqft.toLocaleString()} sqft` },
             { label: "Zone", value: property.zoningCode },

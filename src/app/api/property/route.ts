@@ -227,6 +227,33 @@ interface ApiillowPropertyDetail {
   price_history?: Array<{ date?: string; event?: string; price?: number }>;
 }
 
+/**
+ * Walk APIllow's price_history and return the most recent "Listed for sale"
+ * or "Price change" event within the last 180 days. This is the most reliable
+ * signal for "what is the property listed at TODAY" — much better than
+ * subjectApiillow.price which sometimes returns the last SOLD price by mistake.
+ *
+ * Returns null when no valid recent listing event exists.
+ */
+function findMostRecentListEvent(
+  history: Array<{ date?: string; event?: string; price?: number }> | undefined,
+): { price: number; date: string; event: string } | null {
+  if (!history || history.length === 0) return null;
+  const cutoff = Date.now() - 180 * 24 * 60 * 60 * 1000; // 180 days
+  // Look for events that represent an active listing (not a sale).
+  const LIST_EVENTS = /listed for sale|listing|price (change|reduced|increase)/i;
+  const candidates = history
+    .filter((h) => h.date && h.price && h.price > 50_000 && h.event && LIST_EVENTS.test(h.event))
+    .filter((h) => {
+      const t = Date.parse(h.date!);
+      return !isNaN(t) && t >= cutoff;
+    })
+    .sort((a, b) => Date.parse(b.date!) - Date.parse(a.date!));
+  if (candidates.length === 0) return null;
+  const top = candidates[0];
+  return { price: top.price!, date: top.date!, event: top.event! };
+}
+
 async function lookupApiillowByAddress(
   address: string
 ): Promise<ApiillowPropertyDetail | null> {
@@ -752,19 +779,30 @@ export async function GET(req: NextRequest) {
         : Promise.resolve(null),
     ]);
 
-    // subjectListPrice: prefer active listing price, then Zestimate, then null.
-    // This is the price of THIS property — not the neighborhood median.
+    // subjectListPrice: pick the BEST signal for "what is this property listed at TODAY".
+    //
+    // The hierarchy (most-to-least reliable):
+    //   1. Most recent "Listed for sale" / "Price changed" event in price_history
+    //      within the last 180 days. This is the actual MLS list price, not a guess.
+    //   2. subjectApiillow.price — APIllow's headline price; usually current list but
+    //      sometimes returns the last sold price instead. Less reliable than #1.
+    //   3. subjectApiillow.zestimate — Zillow's estimate. NOT a list price; only
+    //      use when we have nothing else.
+    //
+    // We also surface the listing date so the UI can show "Listed 17 days ago"
+    // and the user can sanity-check against Redfin.
+    const recentListing = findMostRecentListEvent(subjectApiillow?.price_history);
     const subjectListPrice: number | null =
-      (subjectApiillow?.price && subjectApiillow.price > 50000
-        ? subjectApiillow.price
-        : null) ??
-      (subjectApiillow?.zestimate && subjectApiillow.zestimate > 50000
-        ? subjectApiillow.zestimate
-        : null) ??
+      recentListing?.price ??
+      (subjectApiillow?.price && subjectApiillow.price > 50000 ? subjectApiillow.price : null) ??
+      (subjectApiillow?.zestimate && subjectApiillow.zestimate > 50000 ? subjectApiillow.zestimate : null) ??
       null;
+    const subjectListDate: string | null = recentListing?.date ?? null;
 
     const priceSource: "apillow_listing" | "apillow_zestimate" | "neighborhood_median" | "appraised" | "estimate" =
-      subjectApiillow?.price && subjectApiillow.price > 50000
+      recentListing
+        ? "apillow_listing"
+        : subjectApiillow?.price && subjectApiillow.price > 50000
         ? "apillow_listing"
         : subjectApiillow?.zestimate && subjectApiillow.zestimate > 50000
         ? "apillow_zestimate"
@@ -784,6 +822,10 @@ export async function GET(req: NextRequest) {
       isKingCounty: true,
       subjectListPrice,
       priceSource,
+      subjectListDate,
+      // Full price signals so the UI can show "Listed at $X · Zest $Y · Last sold $Z".
+      subjectZestimate: subjectApiillow?.zestimate ?? null,
+      subjectLastSoldPrice: subjectApiillow?.last_sold_price ?? null,
       parcel: {
         pin: kcParcel!.PIN,
         address: kcParcel!.ADDR_FULL,

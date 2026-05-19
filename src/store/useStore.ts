@@ -95,6 +95,12 @@ export interface PropertyData {
   lng?: number;
   /** Where the listingPrice came from. Shown in the UI so users can gauge confidence. */
   priceSource?: "apillow_listing" | "apillow_zestimate" | "neighborhood_median" | "appraised" | "estimate";
+  /** Multi-signal price evidence for the subject — surfaced in the UI so
+   *  the user can sanity-check the headline list price against Zestimate /
+   *  last sold / list date. All optional; populated only for KC properties. */
+  subjectListDate?: string | null;
+  subjectZestimate?: number | null;
+  subjectLastSoldPrice?: number | null;
   /** King County GIS hazard overlay (flood / landslide / wetland / seismic / etc.).
    *  Loaded only when isKingCounty=true. Optional for back-compat with persisted state. */
   hazards?: import("@/lib/hazards/kc-gis").HazardReport | null;
