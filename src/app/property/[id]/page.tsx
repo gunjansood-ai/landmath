@@ -1603,12 +1603,26 @@ export default function PropertyAnalysis() {
                   </thead>
                   <tbody>
                     {property.neighborhood.sales.map((c) => (
-                      <tr key={c.pin + c.saleDate} className="border-b border-gray-50 dark:border-slate-700/50 last:border-0">
+                      <tr
+                        key={c.pin + c.saleDate}
+                        className="border-b border-gray-50 dark:border-slate-700/50 last:border-0 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors cursor-pointer"
+                        onClick={() => c.sourceUrl && window.open(c.sourceUrl, "_blank", "noopener,noreferrer")}
+                      >
                         <td className="py-2 pr-3">
-                          <a href={c.sourceUrl} target="_blank" rel="noopener noreferrer"
-                            className="text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-1">
-                            {c.address} <ExternalLink size={9} />
-                          </a>
+                          <span className="text-blue-600 dark:text-blue-400 inline-flex items-center gap-1">
+                            {c.address.split(",")[0]} <ExternalLink size={9} className="opacity-60 flex-shrink-0" />
+                          </span>
+                          {c.parcelViewerUrl && (
+                            <a
+                              href={c.parcelViewerUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="ml-1.5 text-[10px] text-gray-400 hover:text-blue-500 underline"
+                            >
+                              parcel
+                            </a>
+                          )}
                         </td>
                         <td className="py-2 pr-3 text-gray-600 dark:text-gray-400">{formatSaleDate(c.saleDate)}</td>
                         <td className="py-2 pr-3 text-right font-medium text-gray-900 dark:text-white">{formatCurrency(c.salePrice)}</td>

@@ -36,6 +36,8 @@ export interface PermitRecord {
   longitude: number | null;
   distanceMiles: number | null;
   category: "new_construction" | "addition" | "adu" | "renovation" | "demo" | "other";
+  /** Direct link to the permit record in the city's permit portal */
+  permitUrl?: string;
 }
 
 export interface PermitRadarResult {
@@ -191,8 +193,9 @@ async function fetchSeattlePermits(
       const pLat = r.latitude  ? parseFloat(r.latitude)  : null;
       const pLng = r.longitude ? parseFloat(r.longitude) : null;
       const dist = pLat && pLng ? haversineMiles(lat, lng, pLat, pLng) : null;
+      const permitNum = r.permitnum ?? "";
       return {
-        permitNumber: r.permitnum ?? "",
+        permitNumber: permitNum,
         address: [r.originaladdress1, r.originalcity].filter(Boolean).join(", "),
         permitType: r.permittypemapped ?? "",
         description: r.description ?? "",
@@ -203,6 +206,10 @@ async function fetchSeattlePermits(
         longitude: pLng,
         distanceMiles: dist != null ? Math.round(dist * 100) / 100 : null,
         category: categorizeSeattle(r.permittypemapped ?? "", r.permittypedesc ?? "", r.description ?? ""),
+        // Seattle Accela Citizen Access deep link
+        permitUrl: permitNum
+          ? `https://cosaccela.seattle.gov/portal/Cap/CapDetail.aspx?Module=Building&capID1=${encodeURIComponent(permitNum)}`
+          : undefined,
       };
     })
     .filter((p) => p.category !== "other")
@@ -291,8 +298,9 @@ async function fetchBellevuePermits(
       const dist = pLat && pLng ? haversineMiles(lat, lng, pLat, pLng) : null;
       const ts   = a.ISSUEDDATE;
       const sqftAdu = typeof a.SQFOOTAGEADU === "number" ? a.SQFOOTAGEADU : null;
+      const permitNum = a.PERMITNUMBER ?? "";
       return {
-        permitNumber: a.PERMITNUMBER ?? "",
+        permitNumber: permitNum,
         address: a.SITEADDRESS ?? "",
         permitType: a.PERMITTYPEDESCRIPTION ?? a.PERMITTYPE ?? "",
         description: a.PROJECTDESCRIPTION ?? "",
@@ -305,6 +313,10 @@ async function fetchBellevuePermits(
         category: categorizeBellevue(
           a.PERMITTYPE ?? "", a.PERMITTYPEDESCRIPTION ?? "", a.PROJECTDESCRIPTION ?? "", sqftAdu
         ),
+        // Bellevue Accela Citizen Access deep link
+        permitUrl: permitNum
+          ? `https://epermit.bellevuewa.gov/CitizenAccess/Cap/CapDetail.aspx?Module=Building&capID1=${encodeURIComponent(permitNum)}`
+          : undefined,
       };
     })
     .filter((p: PermitRecord) => p.category !== "other")

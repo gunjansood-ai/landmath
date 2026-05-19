@@ -14,6 +14,7 @@ import {
   TrendingUp,
   MapPin,
   RefreshCw,
+  ExternalLink,
 } from "lucide-react";
 import type { PermitRadarResult, PermitRecord } from "@/app/api/permits/route";
 
@@ -122,9 +123,14 @@ function PermitCategoryPill({ category, count }: { category: PermitRecord["categ
   );
 }
 
+/** Categories relevant for structural investment comparison — renovation/other hidden */
+const STRUCTURAL_CATEGORIES = new Set<PermitRecord["category"]>([
+  "new_construction", "adu", "addition", "demo",
+]);
+
 function PermitRow({ permit }: { permit: PermitRecord }) {
   const cfg = CATEGORY_CONFIG[permit.category];
-  return (
+  const inner = (
     <div className="flex items-start gap-3 py-2.5 border-b border-gray-100 dark:border-slate-700 last:border-0">
       <div className={`mt-0.5 p-1.5 rounded-md ${cfg.bgColor} ${cfg.color} flex-shrink-0`}>
         {cfg.icon}
@@ -132,8 +138,9 @@ function PermitRow({ permit }: { permit: PermitRecord }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate">
+            <div className={`text-xs font-medium truncate ${permit.permitUrl ? "text-blue-700 dark:text-blue-400 group-hover:underline" : "text-gray-800 dark:text-gray-200"}`}>
               {permit.address || "Address unavailable"}
+              {permit.permitUrl && <ExternalLink size={9} className="inline ml-1 opacity-60" />}
             </div>
             {permit.description && (
               <div className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
@@ -167,10 +174,22 @@ function PermitRow({ permit }: { permit: PermitRecord }) {
           {permit.status && permit.status !== "null" && (
             <span className="text-[10px] text-gray-400">{permit.status}</span>
           )}
+          {permit.permitNumber && (
+            <span className="text-[10px] text-gray-400 font-mono">{permit.permitNumber}</span>
+          )}
         </div>
       </div>
     </div>
   );
+
+  if (permit.permitUrl) {
+    return (
+      <a href={permit.permitUrl} target="_blank" rel="noopener noreferrer" className="block group hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
+        {inner}
+      </a>
+    );
+  }
+  return <div>{inner}</div>;
 }
 
 export default function PermitRadar({ lat, lng, address, city }: PermitRadarProps) {
@@ -210,7 +229,11 @@ export default function PermitRadar({ lat, lng, address, city }: PermitRadarProp
 
   const permits = data?.permits ?? [];
   const summary = data?.summary;
-  const visiblePermits = showAll ? permits : permits.slice(0, 6);
+  // Show only structural permits (new construction, ADU, addition, demo).
+  // Renovation/other are still counted in the supply score but aren't shown
+  // in the list — they don't directly compete with a new-build investment.
+  const structuralPermits = permits.filter((p) => STRUCTURAL_CATEGORIES.has(p.category));
+  const visiblePermits = showAll ? structuralPermits : structuralPermits.slice(0, 6);
 
   const activityDot =
     summary?.recentActivity === "high"
@@ -355,25 +378,25 @@ export default function PermitRadar({ lat, lng, address, city }: PermitRadarProp
                 </div>
               )}
 
-              {/* Permit list */}
+              {/* Permit list — structural only */}
               {visiblePermits.length > 0 && (
                 <div>
                   <div className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-2">
-                    Nearby Permits
+                    Nearby Structural Permits <span className="normal-case font-normal">(new builds, ADUs, additions, demos)</span>
                   </div>
                   <div className="border border-gray-100 dark:border-slate-700 rounded-lg overflow-hidden">
                     {visiblePermits.map((p, i) => (
                       <PermitRow key={i} permit={p} />
                     ))}
                   </div>
-                  {permits.length > 6 && (
+                  {structuralPermits.length > 6 && (
                     <button
                       onClick={() => setShowAll((v) => !v)}
                       className="mt-2 text-xs text-blue-600 dark:text-blue-400 hover:underline w-full text-center"
                     >
                       {showAll
                         ? "Show less"
-                        : `Show all ${permits.length} permits`}
+                        : `Show all ${structuralPermits.length} structural permits`}
                     </button>
                   )}
                 </div>
