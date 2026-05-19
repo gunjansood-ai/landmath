@@ -866,12 +866,17 @@ function MultiFamilyDetail({
 
 // ─── Editable Ask Price chip ──────────────────────────────────────────────────
 
-const PRICE_SOURCE_LABELS: Record<string, { label: string; color: string }> = {
-  apillow_listing: { label: "Live listing", color: "text-green-600 dark:text-green-400" },
-  apillow_zestimate: { label: "Zestimate", color: "text-blue-500 dark:text-blue-400" },
-  neighborhood_median: { label: "Comp median", color: "text-amber-600 dark:text-amber-400" },
-  appraised: { label: "Assessed", color: "text-amber-600 dark:text-amber-400" },
-  estimate: { label: "Estimate", color: "text-gray-400" },
+// Price source labels with reliability tier in the color:
+//   green  = confirmed live listing data (best)
+//   blue   = subject-specific Zillow estimate
+//   amber  = KC-assessed × 1.1 (per-property but not market-real-time)
+//   red    = comp median / generic estimate (least specific — VERIFY)
+const PRICE_SOURCE_LABELS: Record<string, { label: string; color: string; verify: boolean }> = {
+  apillow_listing: { label: "Live listing", color: "text-green-600 dark:text-green-400", verify: false },
+  apillow_zestimate: { label: "Zestimate", color: "text-blue-500 dark:text-blue-400", verify: false },
+  appraised: { label: "KC assessed", color: "text-amber-600 dark:text-amber-400", verify: true },
+  neighborhood_median: { label: "Comp median ⚠", color: "text-red-500 dark:text-red-400", verify: true },
+  estimate: { label: "Estimate ⚠", color: "text-red-500 dark:text-red-400", verify: true },
 };
 
 function AskPriceChip({

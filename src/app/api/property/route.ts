@@ -732,11 +732,14 @@ export async function GET(req: NextRequest) {
   }
 
   // ── 1. Try King County GIS first ─────────────────────────────────────────
+  // ZIP5 is critical for APIllow/Redfin address matching — without it, common
+  // street names in dense cities like Bellevue collide and the lookup returns
+  // null (root cause of the wrong-price bug at 16610 SE 24th).
   const parcelResults = (await queryPropertyInfoPoint(
     2,
     lat,
     lng,
-    "PIN,ADDR_FULL,CTYNAME,POSTALCTYNAME,LOTSQFT,APPRLNDVAL,APPR_IMPR,KCA_ZONING,KCA_ACRES,PREUSE_CODE,PREUSE_DESC,PROPTYPE"
+    "PIN,ADDR_FULL,CTYNAME,POSTALCTYNAME,ZIP5,LOTSQFT,APPRLNDVAL,APPR_IMPR,KCA_ZONING,KCA_ACRES,PREUSE_CODE,PREUSE_DESC,PROPTYPE"
   )) as Array<Record<string, unknown>>;
   const kcParcel = parcelResults[0] ?? null;
   const isKingCounty = kcParcel !== null;
@@ -753,9 +756,10 @@ export async function GET(req: NextRequest) {
     // addresses in ALL CAPS ("17426 SE 60TH ST", "BELLEVUE") — normalise to
     // title case so APIllow/Zillow matching works reliably.
     const kcStreetAddr = (kcParcel!.ADDR_FULL as string)?.trim() ?? null;
+    const kcZip = (kcParcel!.ZIP5 as string)?.trim() ?? null;
     const subjectFullAddress =
       kcStreetAddr && subjectCity
-        ? `${toTitleCaseAddress(kcStreetAddr)}, ${toTitleCaseAddress(subjectCity)}, WA`
+        ? `${toTitleCaseAddress(kcStreetAddr)}, ${toTitleCaseAddress(subjectCity)}, WA${kcZip ? ` ${kcZip}` : ""}`
         : null;
 
     const [assessor, neighborhood, subjectApiillow, hazards, history] = await Promise.all([

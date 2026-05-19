@@ -160,11 +160,33 @@ export default function Home() {
       //  3. appraisedTotal × 1.1 — KC assessed value grossed up to approximate market
       //  4. estimateValue()  — flat ZIP-table fallback
       const appraisedTotal = parcel?.appraisedTotal || 0;
+      // Price fallback chain — picks the most property-specific signal first.
+      //
+      // 1. subjectListPrice — APIllow's live MLS list price (if it returned data)
+      // 2. appraisedTotal × 1.1 — KC assessor's value for THIS lot, grossed up
+      //    ~10% to bridge the chronic under-assessment vs market.
+      //    This is per-property data, much more accurate than a neighborhood
+      //    median for a specific home.
+      // 3. marketEstimate — neighborhood comp median. Least specific; reflects
+      //    average nearby home, not this one. Only use when KC has no
+      //    appraisal data (raw land, just-split lots, etc.).
+      // 4. estimateValue — ZIP-table flat fallback.
+      //
+      // The 16610 SE 24th case (asked $1.25M, comp median was $1.59M but
+      // appraised × 1.1 = $1.25M = exactly right) is the canonical reason
+      // appraised now beats comp-median in the chain.
+      const appraisedGrossed = appraisedTotal > 0 ? Math.round(appraisedTotal * 1.1) : null;
       const bestListPrice =
         subjectListPrice ||
+        appraisedGrossed ||
         marketEstimate ||
-        (appraisedTotal > 0 ? Math.round(appraisedTotal * 1.1) : null) ||
         estimateValue(geo.city, assessor?.sqftLiving || 1500);
+      // Correct the price source label so the UI reflects what we actually used.
+      const correctedPriceSource: typeof priceSource =
+        subjectListPrice ? priceSource :
+        appraisedGrossed ? "appraised" :
+        marketEstimate ? "neighborhood_median" :
+        "estimate";
 
       const property = {
         id: `prop-${Date.now()}`,
@@ -184,7 +206,7 @@ export default function Home() {
         currentSqft: assessor?.sqftLiving || 1500,
         yearBuilt: assessor?.yearBuilt || 1970,
         listingPrice: bestListPrice,
-        priceSource,
+        priceSource: correctedPriceSource,
         subjectListDate: propertyData.subjectListDate ?? null,
         subjectZestimate: propertyData.subjectZestimate ?? null,
         subjectLastSoldPrice: propertyData.subjectLastSoldPrice ?? null,
