@@ -29,6 +29,7 @@ import {
   getMiddleHousingOverlay,
 } from "@/lib/zoning/wa-state-laws";
 import { runSensitivity, type SensitivityReport } from "@/lib/sensitivity";
+import { computeDrawSchedule, FINANCING_PRESETS } from "@/lib/draw-schedule";
 
 // Cost per sqft by quality tier (WA state defaults)
 export const DEFAULT_COST_PER_SQFT: Record<QualityTier, number> = {
@@ -1579,7 +1580,7 @@ export function calculateAnalysis(
     contingency +
     landscaping;
 
-  // Monthly holding costs
+  // Monthly fixed holding costs — paid every month regardless of construction phase.
   const monthlyMortgage = calculateMonthlyPayment(
     loanAmount,
     financing.interestRate,
@@ -1590,12 +1591,47 @@ export function calculateAnalysis(
   const monthlyInsurance = (purchasePrice * 0.004) / 12; // ~0.4% annually
   const monthlyHoa = property.hoaMonthly || 0;
   const monthlyUtilities = 300;
-  // Holding-cost override: caller pins the monthly amount. Total still
-  // multiplies by the (possibly overridden) timeline so the two are coherent.
+  // Fixed monthly = everything that's invariant of construction draw phase.
+  // Construction loan interest is added separately via the draw schedule.
+  const fixedMonthlyHolding = monthlyTax + monthlyInsurance + monthlyHoa + monthlyUtilities;
+
+  // ── Construction draw schedule + financed cash-flow model ──────────────────
+  // Hard-money construction loan by default (80% LTC @ 10% interest-only, 2 pts).
+  // Interest accrues ONLY on the drawn balance, per AIA G702 S-curve schedule.
+  // Total interest is much lower than naive (full loan × rate × months), and
+  // weighted-avg equity (for ROI) is well below peak.
+  const cf = financing.constructionFinancing ?? "hard_money";
+  const preset = FINANCING_PRESETS[cf];
+  const ltc = financing.constructionLtcPct ?? preset.constructionLtcPct;
+  const constRate = financing.constructionRate ?? preset.constructionRate;
+  const constPoints = financing.constructionPoints ?? preset.constructionPoints;
+  const draw = computeDrawSchedule({
+    constructionCost,
+    permitMonths,
+    buildMonths,
+    sellMonths,
+    constructionLtcPct: ltc,
+    constructionRate: constRate,
+    constructionPoints: constPoints,
+    upfrontEquity: downPayment + closingCosts,
+    acquisitionLoanBalance: loanAmount,
+    acquisitionMonthlyPayment: monthlyMortgage,
+  });
+  // Total holding = acquisition P&I (every month) + construction loan
+  // interest (drawn balance only) + fixed monthly costs over T months.
+  // Holding-cost OVERRIDE still takes precedence if caller pinned it.
+  const naturalHolding =
+    monthlyMortgage * timelineMonths +
+    draw.totalConstructionInterest +
+    fixedMonthlyHolding * timelineMonths +
+    draw.originationFees;
   const holdingCostMonthly =
     overrides?.holdingCostMonthly ??
-    monthlyMortgage + monthlyTax + monthlyInsurance + monthlyHoa + monthlyUtilities;
-  const totalHoldingCost = holdingCostMonthly * timelineMonths;
+    Math.round(naturalHolding / timelineMonths);
+  const totalHoldingCost =
+    overrides?.holdingCostMonthly != null
+      ? overrides.holdingCostMonthly * timelineMonths
+      : naturalHolding;
 
   // Selling costs. Default = 5% commission + 1.8% WA excise + 1% concessions
   // + flat staging. Override = pin the dollar amount directly.
@@ -1610,9 +1646,19 @@ export function calculateAnalysis(
   // Totals
   const totalProjectCost = acquisitionCost + constructionCost + totalHoldingCost + sellingCosts;
   const profit = expectedSalePrice - totalProjectCost;
-  const totalCashInvested = downPayment + constructionCost + totalHoldingCost + closingCosts;
-  const roi = totalCashInvested > 0 ? (profit / totalCashInvested) * 100 : 0;
+  // Peak cash deployed = the most you ever had tied up (for sizing your bankroll).
+  const peakCashDeployed = downPayment + constructionCost + totalHoldingCost + closingCosts;
+  // ROI denominator: prefer the draw-schedule's weighted-average cash deployed.
+  // This is what was actually tied up over the project life — much more
+  // honest than peak. Falls back to peak if the draw schedule is degenerate
+  // (zero timeline, etc.).
+  const cashInvestedForRoi = draw.weightedAvgCashDeployed > 0
+    ? draw.weightedAvgCashDeployed
+    : peakCashDeployed;
+  const roi = cashInvestedForRoi > 0 ? (profit / cashInvestedForRoi) * 100 : 0;
   const annualizedRoi = timelineMonths > 0 ? roi * (12 / timelineMonths) : 0;
+  // Kept for back-compat with existing UI/sensitivity code that reads totalCashInvested.
+  const totalCashInvested = cashInvestedForRoi;
 
   // Generate recommendation text
   let recommendation = "";
@@ -1829,6 +1875,8 @@ export function calculateAnalysis(
     trendBumpApplied: guardrails?.trendBumpApplied,
     safeMaxSqft: guardrails?.size.medianSqft ? guardrails.size.safeMaxSqft : undefined,
     sensitivity,
+    drawSchedule: draw,
+    peakCashDeployed,
   };
 }
 

@@ -998,6 +998,12 @@ export default function PropertyAnalysis() {
     interestRate: settings.defaultInterestRate,
     loanTermYears: 30,
     points: 0,
+    // Construction financing defaults: hard money (80% LTC @ 10%, 2 pts).
+    // Most common pattern for WA spec / split / SFR builds.
+    constructionFinancing: "hard_money",
+    constructionLtcPct: 0.80,
+    constructionRate: 10,
+    constructionPoints: 2,
   });
   const [listPriceOverride, setListPriceOverride] = useState<number | undefined>(undefined);
   const [strategyOverrides, setStrategyOverrides] = useState<Partial<Record<Strategy, StrategyOverrides>>>({});
@@ -1268,6 +1274,100 @@ export default function PropertyAnalysis() {
                 )}
               </div>
             </div>
+          </div>
+
+          {/* ── Construction Financing ──────────────────────────────────
+              Models how the BUILD is funded. Hard money (~80% LTC @ 10%, 2 pts)
+              is the WA developer default and is the most realistic model for
+              cash-flow projections — interest accrues only on the drawn
+              balance, drawn per AIA G702 S-curve schedule. */}
+          <div className="mt-3 pt-3 border-t border-gray-200 dark:border-slate-700">
+            <label className="text-xs font-semibold text-gray-600 dark:text-gray-400 mb-2 block">
+              Construction Financing
+              <span className="ml-2 text-[10px] font-normal text-gray-400">
+                how the BUILD is funded (separate from purchase mortgage)
+              </span>
+            </label>
+            <div className="flex gap-1 bg-gray-100 dark:bg-slate-700 p-1 rounded-xl mb-2">
+              {(["cash", "hard_money", "bank_construction", "custom"] as const).map((cf) => {
+                const labels = { cash: "All Cash", hard_money: "Hard $", bank_construction: "Bank", custom: "Custom" } as const;
+                const presets: Record<typeof cf, { ltc: number; rate: number; pts: number }> = {
+                  cash: { ltc: 0, rate: 0, pts: 0 },
+                  hard_money: { ltc: 0.80, rate: 10, pts: 2 },
+                  bank_construction: { ltc: 0.80, rate: 8, pts: 1 },
+                  custom: {
+                    ltc: financing.constructionLtcPct ?? 0.75,
+                    rate: financing.constructionRate ?? 9,
+                    pts: financing.constructionPoints ?? 1.5,
+                  },
+                };
+                const active = (financing.constructionFinancing ?? "hard_money") === cf;
+                return (
+                  <button key={cf}
+                    onClick={() => {
+                      const p = presets[cf];
+                      setFinancing({
+                        ...financing,
+                        constructionFinancing: cf,
+                        constructionLtcPct: p.ltc,
+                        constructionRate: p.rate,
+                        constructionPoints: p.pts,
+                      });
+                    }}
+                    className={`flex-1 px-1 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      active ? "bg-white dark:bg-slate-600 text-gray-900 dark:text-white shadow-sm" : "text-gray-500 hover:text-gray-700"
+                    }`}>
+                    {labels[cf]}
+                  </button>
+                );
+              })}
+            </div>
+            {/* Editable LTC / Rate / Points (hidden for All Cash). Edits flip mode to "custom". */}
+            {(financing.constructionFinancing ?? "hard_money") !== "cash" && (
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] text-gray-500">LTC:</span>
+                  <input type="number" step="5" min="0" max="100"
+                    value={Math.round((financing.constructionLtcPct ?? 0.80) * 100)}
+                    onChange={(e) => setFinancing({
+                      ...financing,
+                      constructionFinancing: "custom",
+                      constructionLtcPct: Math.max(0, Math.min(1, Number(e.target.value) / 100)),
+                    })}
+                    className="w-14 px-2 py-1 text-xs bg-gray-50 dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white" />
+                  <span className="text-[11px] text-gray-400">%</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] text-gray-500">Rate:</span>
+                  <input type="number" step="0.25" min="0"
+                    value={financing.constructionRate ?? 10}
+                    onChange={(e) => setFinancing({
+                      ...financing,
+                      constructionFinancing: "custom",
+                      constructionRate: Number(e.target.value),
+                    })}
+                    className="w-16 px-2 py-1 text-xs bg-gray-50 dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white" />
+                  <span className="text-[11px] text-gray-400">% APR</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] text-gray-500">Points:</span>
+                  <input type="number" step="0.25" min="0"
+                    value={financing.constructionPoints ?? 2}
+                    onChange={(e) => setFinancing({
+                      ...financing,
+                      constructionFinancing: "custom",
+                      constructionPoints: Number(e.target.value),
+                    })}
+                    className="w-14 px-2 py-1 text-xs bg-gray-50 dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white" />
+                  <span className="text-[11px] text-gray-400">% upfront</span>
+                </div>
+              </div>
+            )}
+            <p className="text-[10px] text-gray-400 leading-snug mt-2">
+              Interest accrues only on drawn balance, drawn per AIA G702 S-curve.
+              ROI denominator uses weighted-avg capital deployed across the timeline,
+              not peak.
+            </p>
           </div>
         </div>
 

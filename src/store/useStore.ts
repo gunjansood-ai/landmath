@@ -102,12 +102,32 @@ export interface PropertyData {
   history?: import("@/lib/history/kc-history").PropertyHistory | null;
 }
 
+/** How construction is financed. Drives the draw-schedule cash-flow model. */
+export type ConstructionFinancing = "cash" | "hard_money" | "bank_construction" | "custom";
+
 export interface FinancingConfig {
   type: FinancingType;
   downPaymentPct: number;
   interestRate: number;
   loanTermYears: number;
   points: number; // for hard money
+
+  /** ── Construction financing (separate loan, drawn per S-curve) ──
+   *
+   * Models the most common WA developer pattern: hard money or bank
+   * construction loan funds 75-85% of construction; the rest is investor
+   * cash. Loan is interest-only on drawn balance during build; paid off at
+   * sale (or refi'd to permanent at completion for hold-rent exits).
+   *
+   * Default: hard money at 80% LTC, 10% APR, 2 points up-front.
+   * Set constructionLtcPct = 0 to model an all-cash build. */
+  constructionFinancing?: ConstructionFinancing;
+  /** Fraction of construction cost financed by the loan (0 = all cash, 0.85 = 85% LTC). */
+  constructionLtcPct?: number;
+  /** Annual interest rate on the construction loan (percent, e.g. 10 for 10%). */
+  constructionRate?: number;
+  /** One-time origination cost as % of construction loan (e.g. 2 for 2 points). */
+  constructionPoints?: number;
 }
 
 export interface AnalysisResult {
@@ -149,6 +169,11 @@ export interface AnalysisResult {
   /** Stress-test results: profit under interest-rate / build-cost / sale-price
    *  / timeline shocks plus stacked bear/bull cases. */
   sensitivity?: import("@/lib/sensitivity").SensitivityReport;
+  /** Construction draw schedule + cash-flow series. Drives the "your cash
+   *  isn't deployed all at once" visualization and lower ROI denominator. */
+  drawSchedule?: import("@/lib/draw-schedule").DrawScheduleResult;
+  /** Peak cash deployed at any single month — sizing for bankroll planning. */
+  peakCashDeployed?: number;
 
   // ── Townhome / Multi-family specific (optional — only set for those strategies) ──
   unitCount?: number;
