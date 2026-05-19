@@ -313,9 +313,9 @@ async function fetchBellevuePermits(
         category: categorizeBellevue(
           a.PERMITTYPE ?? "", a.PERMITTYPEDESCRIPTION ?? "", a.PROJECTDESCRIPTION ?? "", sqftAdu
         ),
-        // Bellevue Accela Citizen Access deep link
+        // Bellevue MyBuildingPermit deep link
         permitUrl: permitNum
-          ? `https://epermit.bellevuewa.gov/CitizenAccess/Cap/CapDetail.aspx?Module=Building&capID1=${encodeURIComponent(permitNum)}`
+          ? `https://permitsearch.mybuildingpermit.com/PermitDetails/${encodeURIComponent(permitNum)}/Bellevue`
           : undefined,
       };
     })
