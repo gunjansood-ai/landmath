@@ -1,7 +1,19 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Allow overriding the build dir (used by sandboxed builds where the default
+  // .next dir sits on a FUSE mount that can't unlink hidden files). Defaults
+  // to .next everywhere else — no effect on Vercel.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
+  images: {
+    remotePatterns: [
+      {
+        // Google profile photos (used in nav user avatar)
+        protocol: "https",
+        hostname: "lh3.googleusercontent.com",
+      },
+    ],
+  },
 };
 
 export default nextConfig;

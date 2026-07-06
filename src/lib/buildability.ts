@@ -42,7 +42,11 @@ export interface Comp {
   yearBuilt?: number;      // populated when assessor lookup succeeds
   isNewConstructionAtSale?: boolean; // true when yearBuilt ≥ saleYear - 5
   lotSizeSqft?: number;
-  distanceM?: number;      // distance from subject parcel
+  distanceM?: number;      // distance from subject parcel (metres)
+  distanceMiles?: number;  // distance from subject in miles (set for APIllow comps)
+  /** Months between this sale and the prior sale of the same property
+   *  (derived from APIllow price_history). A value of 6–24 is a strong flip signal. */
+  buyHoldMonths?: number;
   pricePerSqft?: number;
   sourceUrl: string;       // KC Assessor / county detail page — drill-in link
   parcelViewerUrl?: string;

@@ -88,8 +88,11 @@ assert("multifamily on SR-3 (10k sqft) -> conditional (HB 1110 Tier 1, 4 units a
   checkFeasibility(subject, "multifamily") === "conditional");
 assert("townhome on Bellevue MDR-2 -> permitted (base zone allows)",
   checkFeasibility({ ...subject, zoningCode: "MDR-2" }, "townhome") === "permitted");
-assert("townhome on Newcastle SF zone -> not_allowed (no HB 1110 — pop <25k)",
-  checkFeasibility({ ...subject, city: "Newcastle", zoningCode: "R-4" }, "townhome") === "not_allowed");
+// Updated Jul 2026: Newcastle IS covered by HB 1110 as a Tier 3 city
+// (<25k pop inside the contiguous KC UGA, RCW 36.70A.635(1)(a)) → 2 units/lot
+// unlocks attached forms as conditional.
+assert("townhome on Newcastle SF zone -> conditional (HB 1110 Tier 3, 2 units/lot)",
+  checkFeasibility({ ...subject, city: "Newcastle", zoningCode: "R-4" }, "townhome") === "conditional");
 assert("townhome on unincorporated KC R-4 -> not_allowed (HB 1110 doesn't apply to unincorporated)",
   checkFeasibility({ ...subject, city: "King County", zoningCode: "R-4" }, "townhome") === "not_allowed");
 assert("split_build on Bellevue MDR-2 -> not_allowed (density-governed, no short plat)",

@@ -590,20 +590,41 @@ async function buildNeighborhood(
       const price = p.last_sold_price ?? p.price ?? 0;
       const sqft = p.living_area && p.living_area > 200 ? p.living_area : undefined;
       const yearBuilt = p.year_built && p.year_built > 1800 ? p.year_built : undefined;
-      // Extract sold date from price_history events.
-      const soldEvent = p.price_history
-        ? [...p.price_history].reverse().find((e) => e.event?.toLowerCase().includes("sold"))
-        : undefined;
-      const saleDate = soldEvent?.date?.slice(0, 10) ?? "";
+
+      // Extract sold events from price_history, sorted newest-first.
+      const soldEvents = [...(p.price_history ?? [])]
+        .filter((e) => e.event?.toLowerCase().includes("sold") && e.date)
+        .sort((a, b) => Date.parse(b.date!) - Date.parse(a.date!));
+
+      const saleDate = soldEvents[0]?.date?.slice(0, 10) ?? "";
       const saleTs = saleDate ? Date.parse(saleDate) : NaN;
       const saleYear = !isNaN(saleTs)
         ? new Date(saleTs).getFullYear()
         : new Date().getFullYear();
+
       // Widened from 5 to 10 years. A 2016 build sold in 2024 is still a
       // valid "new construction" comp for valuation purposes — the home
       // presents as modern and prices accordingly.
       const isNewConstructionAtSale =
         yearBuilt !== undefined && yearBuilt >= saleYear - 10;
+
+      // Flip indicator: months between the most recent sale and the one before it.
+      // A value of 6–24 is a strong signal the property was bought, renovated, and flipped.
+      const priorSaleDate = soldEvents[1]?.date?.slice(0, 10) ?? "";
+      const buyHoldMonths =
+        saleDate && priorSaleDate
+          ? Math.round(
+              (Date.parse(saleDate) - Date.parse(priorSaleDate)) /
+                (30.5 * 24 * 60 * 60 * 1000)
+            )
+          : undefined;
+
+      // Distance from subject parcel (both metres and miles).
+      const distMiles =
+        p.latitude && p.longitude
+          ? Math.round(haversineMiles(lat, lng, p.latitude, p.longitude) * 100) / 100
+          : undefined;
+
       const formattedAddr = p.street_address
         ? `${p.street_address}, ${p.city ?? ""}, ${p.state ?? ""} ${p.zipcode ?? ""}`.trim()
         : "Unknown";
@@ -619,6 +640,8 @@ async function buildNeighborhood(
         sqftLiving: sqft,
         yearBuilt,
         isNewConstructionAtSale,
+        buyHoldMonths,
+        distanceMiles: distMiles,
         pricePerSqft: sqft && price ? Math.round(price / sqft) : undefined,
         sourceUrl: kc?.PIN
           ? KC_ASSESSOR_DETAIL(kc.PIN)

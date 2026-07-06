@@ -28,6 +28,18 @@ export type ZoningKind =
   | "commercial"
   | "rural";
 
+/** Dimensional development envelope for a zone, where researched. */
+export interface ZoningEnvelope {
+  /** Max building lot coverage, percent of lot area. */
+  maxLotCoveragePct?: number;
+  /** Max impervious surface, percent (some codes use this instead of coverage). */
+  maxImperviousPct?: number;
+  /** Max floor-area ratio where the code uses FAR (rare in KC SF zones; Mercer Island does). */
+  maxFAR?: number;
+  /** Max structure height in feet. */
+  maxHeightFt?: number;
+}
+
 export interface ZoningRule {
   /** Minimum lot size required to create a new lot in this district (sqft). */
   minLotSqft: number | null;
@@ -43,6 +55,17 @@ export interface ZoningRule {
   codeUrl: string;
   /** Optional plain-English note shown to the user. */
   note?: string;
+  /** Coverage / FAR / height limits where researched (drives buildable-sqft caps). */
+  envelope?: ZoningEnvelope;
+  /** Units per lot under the city's ADOPTED HB 1110 middle-housing ordinance
+   *  (differs from the state-law floor when the city adopted more, e.g.
+   *  Des Moines 4 units or 24 du/ac). When unset, callers fall back to the
+   *  state-law tier floor in wa-state-laws.ts. */
+  middleHousingUnitsPerLot?: number;
+  /** Data provenance. "verified" = read from current official code text (Jul 2026 pass),
+   *  "secondary" = official text via mirror/machine extraction (spot-check),
+   *  "unverified" = best estimate. Unset = original pre-2026 research (treat as secondary). */
+  verified?: "verified" | "secondary" | "unverified";
 }
 
 type CityCode = string; // normalized upper-case zoning code (e.g. "SR-3", "LR1")
@@ -77,7 +100,9 @@ const BELLEVUE_WA: Record<CityCode, ZoningRule> = {
     minLotSqft: 8500, maxDuPerAcre: null, kind: "sf", allowsShortPlat: true,
     codeSection: "Bellevue LUC 20.20.010 Chart · Suburban Residential 3",
     codeUrl: "https://bellevue.municipal.codes/LUC/20.20.010",
-    note: "Single-family detached only. A 2-lot short plat requires ≥17,000 sqft (2 × 8,500). Townhome and multifamily forms are not permitted.",
+    middleHousingUnitsPerLot: 4,
+    verified: "verified",
+    note: "A 2-lot short plat requires ≥17,000 sqft (2 × 8,500). Post-2025 Middle Housing LUCA, middle housing (up to 4 units/lot, more near transit or with affordability) is permitted per LUC 20.20.538 — detached-only is no longer accurate.",
   },
   "SR-4": {
     minLotSqft: 7200, maxDuPerAcre: null, kind: "sf", allowsShortPlat: true,
@@ -125,15 +150,24 @@ const SEATTLE_WA: Record<CityCode, ZoningRule> = {
   "SF 9600": { minLotSqft: 9600, maxDuPerAcre: null, kind: "sf", allowsShortPlat: true,
     codeSection: "Seattle SMC 23.44 · Single-Family 9600",
     codeUrl: "https://library.municode.com/wa/seattle/codes/municipal_code" },
-  "NR1": { minLotSqft: 9600, maxDuPerAcre: 4.5, kind: "sf_attached", allowsShortPlat: true,
-    codeSection: "Seattle SMC 23.44 · Neighborhood Residential 1",
-    codeUrl: "https://library.municode.com/wa/seattle/codes/municipal_code" },
-  "NR2": { minLotSqft: 7200, maxDuPerAcre: 6, kind: "sf_attached", allowsShortPlat: true,
-    codeSection: "Seattle SMC 23.44 · Neighborhood Residential 2",
-    codeUrl: "https://library.municode.com/wa/seattle/codes/municipal_code" },
-  "NR3": { minLotSqft: 5000, maxDuPerAcre: 8.7, kind: "sf_attached", allowsShortPlat: true,
-    codeSection: "Seattle SMC 23.44 · Neighborhood Residential 3",
-    codeUrl: "https://library.municode.com/wa/seattle/codes/municipal_code" },
+  "NR1": { minLotSqft: 9600, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Seattle SMC 23.44 · Neighborhood Residential 1 (+ interim HB 1110 ord., May 2025)",
+    codeUrl: "https://library.municode.com/wa/seattle/codes/municipal_code",
+    envelope: { maxLotCoveragePct: 35, maxHeightFt: 30 },
+    middleHousingUnitsPerLot: 4, verified: "verified",
+    note: "Interim HB 1110 ordinance (approved May 27, 2025): at least 4 units/lot in all NR zones; 6 near major transit or when 2 units are affordable." },
+  "NR2": { minLotSqft: 7200, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Seattle SMC 23.44 · Neighborhood Residential 2 (+ interim HB 1110 ord., May 2025)",
+    codeUrl: "https://library.municode.com/wa/seattle/codes/municipal_code",
+    envelope: { maxLotCoveragePct: 35, maxHeightFt: 30 },
+    middleHousingUnitsPerLot: 4, verified: "verified",
+    note: "Interim HB 1110 ordinance: at least 4 units/lot; 6 near major transit / with affordability." },
+  "NR3": { minLotSqft: 5000, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Seattle SMC 23.44 · Neighborhood Residential 3 (+ interim HB 1110 ord., May 2025)",
+    codeUrl: "https://library.municode.com/wa/seattle/codes/municipal_code",
+    envelope: { maxLotCoveragePct: 35, maxHeightFt: 30 },
+    middleHousingUnitsPerLot: 4, verified: "verified",
+    note: "Interim HB 1110 ordinance: at least 4 units/lot; 6 near major transit / with affordability." },
   "RSL": { minLotSqft: 2500, maxDuPerAcre: 17, kind: "sf_attached", allowsShortPlat: true,
     codeSection: "Seattle SMC 23.43 · Residential Small Lot",
     codeUrl: "https://library.municode.com/wa/seattle/codes/municipal_code" },
@@ -166,6 +200,22 @@ const KIRKLAND_WA: Record<CityCode, ZoningRule> = {
     codeSection: "Kirkland KZC 15.30 · RS 12.5", codeUrl: "https://kirkland.municipal.codes/KZC/15.30" },
   "RSA 8": { minLotSqft: 3800, maxDuPerAcre: 10, kind: "sf_attached", allowsShortPlat: true,
     codeSection: "Kirkland KZC 15.30 · RSA 8", codeUrl: "https://kirkland.municipal.codes/KZC/15.30" },
+  // Added Jul 2026 (KZC 15.30 full table — machine-extracted from official host):
+  "RS 35": { minLotSqft: 35000, maxDuPerAcre: null, kind: "sf", allowsShortPlat: true,
+    codeSection: "Kirkland KZC 15.30 · RS 35", codeUrl: "https://kirkland.municipal.codes/KZC/15.30",
+    envelope: { maxLotCoveragePct: 50, maxHeightFt: 25 }, verified: "secondary" },
+  "RS 6.3": { minLotSqft: 6300, maxDuPerAcre: null, kind: "sf", allowsShortPlat: true,
+    codeSection: "Kirkland KZC 15.30 · RS 6.3", codeUrl: "https://kirkland.municipal.codes/KZC/15.30",
+    envelope: { maxLotCoveragePct: 50, maxHeightFt: 25 }, verified: "secondary" },
+  "RS 5.0": { minLotSqft: 5000, maxDuPerAcre: null, kind: "sf", allowsShortPlat: true,
+    codeSection: "Kirkland KZC 15.30 · RS 5.0", codeUrl: "https://kirkland.municipal.codes/KZC/15.30",
+    envelope: { maxLotCoveragePct: 50, maxHeightFt: 25 }, verified: "secondary" },
+  "RSA 4": { minLotSqft: 7600, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Kirkland KZC 15.30 · RSA 4", codeUrl: "https://kirkland.municipal.codes/KZC/15.30",
+    envelope: { maxLotCoveragePct: 60, maxHeightFt: 30 }, verified: "secondary" },
+  "RSA 6": { minLotSqft: 5100, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Kirkland KZC 15.30 · RSA 6", codeUrl: "https://kirkland.municipal.codes/KZC/15.30",
+    envelope: { maxLotCoveragePct: 60, maxHeightFt: 30 }, verified: "secondary" },
   "RM 5.0": { minLotSqft: 5000, maxDuPerAcre: 8.7, kind: "multifamily", allowsShortPlat: false,
     codeSection: "Kirkland KZC 20.30 · RM 5.0", codeUrl: "https://kirkland.municipal.codes/KZC/20.30" },
   "RM 3.6": { minLotSqft: 3600, maxDuPerAcre: 12, kind: "multifamily", allowsShortPlat: false,
@@ -210,15 +260,23 @@ const RENTON_WA: Record<CityCode, ZoningRule> = {
   "R-1": { minLotSqft: 43560, maxDuPerAcre: 1, kind: "sf", allowsShortPlat: true,
     codeSection: "Renton RMC 4-2-110A · R-1",
     codeUrl: "https://www.codepublishing.com/WA/Renton/html/Renton04/Renton0402/Renton0402110A.html" },
-  "R-4": { minLotSqft: 8000, maxDuPerAcre: 4, kind: "sf", allowsShortPlat: true,
+  "R-4": { minLotSqft: 9000, maxDuPerAcre: 4, kind: "sf", allowsShortPlat: true,
     codeSection: "Renton RMC 4-2-110A · R-4",
-    codeUrl: "https://www.codepublishing.com/WA/Renton/html/Renton04/Renton0402/Renton0402110A.html" },
+    codeUrl: "https://www.codepublishing.com/WA/Renton/html/Renton04/Renton0402/Renton0402110A.html",
+    envelope: { maxLotCoveragePct: 35, maxImperviousPct: 50, maxHeightFt: 32 },
+    verified: "verified",
+    note: "Corrected Jul 2026: min lot is 9,000 sqft (was 8,000 in an earlier table). Middle-housing standards: RMC 4-2-110F." },
   "R-6": { minLotSqft: 7000, maxDuPerAcre: 6, kind: "sf", allowsShortPlat: true,
     codeSection: "Renton RMC 4-2-110A · R-6",
-    codeUrl: "https://www.codepublishing.com/WA/Renton/html/Renton04/Renton0402/Renton0402110A.html" },
-  "R-8": { minLotSqft: 4500, maxDuPerAcre: 8, kind: "sf", allowsShortPlat: true,
+    codeUrl: "https://www.codepublishing.com/WA/Renton/html/Renton04/Renton0402/Renton0402110A.html",
+    envelope: { maxLotCoveragePct: 40, maxImperviousPct: 55, maxHeightFt: 32 },
+    verified: "verified" },
+  "R-8": { minLotSqft: 5000, maxDuPerAcre: 8, kind: "sf", allowsShortPlat: true,
     codeSection: "Renton RMC 4-2-110A · R-8",
-    codeUrl: "https://www.codepublishing.com/WA/Renton/html/Renton04/Renton0402/Renton0402110A.html" },
+    codeUrl: "https://www.codepublishing.com/WA/Renton/html/Renton04/Renton0402/Renton0402110A.html",
+    envelope: { maxLotCoveragePct: 50, maxImperviousPct: 65, maxHeightFt: 32 },
+    verified: "verified",
+    note: "Corrected Jul 2026: min lot is 5,000 sqft (was 4,500 in an earlier table). Middle-housing standards: RMC 4-2-110F." },
   "R-10": { minLotSqft: 3000, maxDuPerAcre: 10, kind: "sf_attached", allowsShortPlat: true,
     codeSection: "Renton RMC 4-2-110A · R-10",
     codeUrl: "https://www.codepublishing.com/WA/Renton/html/Renton04/Renton0402/Renton0402110A.html" },
@@ -548,6 +606,355 @@ const KING_COUNTY_UNINC: Record<CityCode, ZoningRule> = {
     codeUrl: "https://kingcounty.gov/en/legacy/services/gis/propresearch/kc_zoning" },
 };
 
+// ─── Des Moines, WA — DMMC Title 18 (added Jul 2026) ────────────────────────
+// Middle housing (Ord. 1821, 2025): 4 units/lot or 24 du/ac in all RS zones;
+// up to 3 ADUs count toward the 4; ADU condo conveyance allowed (Ord. 1820).
+const DES_MOINES_WA: Record<CityCode, ZoningRule> = {
+  "RS-15000": { minLotSqft: 15000, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Des Moines DMMC 18.52.010A · RS-15,000 (+ Ord. 1821 middle housing)",
+    codeUrl: "https://www.codepublishing.com/WA/DesMoines/#!/DesMoines18/DesMoines1852.html",
+    middleHousingUnitsPerLot: 4, verified: "verified",
+    note: "HB 1110 (Ord. 1821): up to 4 units/lot or 24 du/ac, whichever is greater; max 3 ADUs count toward the total." },
+  "RS-9600": { minLotSqft: 9600, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Des Moines DMMC 18.52.010A · RS-9,600",
+    codeUrl: "https://www.codepublishing.com/WA/DesMoines/#!/DesMoines18/DesMoines1852.html",
+    middleHousingUnitsPerLot: 4, verified: "verified" },
+  "RS-8400": { minLotSqft: 8400, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Des Moines DMMC 18.52.010A · RS-8,400",
+    codeUrl: "https://www.codepublishing.com/WA/DesMoines/#!/DesMoines18/DesMoines1852.html",
+    middleHousingUnitsPerLot: 4, verified: "verified" },
+  "RS-7200": { minLotSqft: 7200, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Des Moines DMMC 18.52.010A · RS-7,200",
+    codeUrl: "https://www.codepublishing.com/WA/DesMoines/#!/DesMoines18/DesMoines1852.html",
+    middleHousingUnitsPerLot: 4, verified: "verified" },
+  "RS-4000": { minLotSqft: 4000, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Des Moines DMMC 18.52.010A · RS-4,000",
+    codeUrl: "https://www.codepublishing.com/WA/DesMoines/#!/DesMoines18/DesMoines1852.html",
+    middleHousingUnitsPerLot: 4, verified: "verified" },
+};
+
+// ─── Kenmore, WA — KMC 18.21 (Ord. 25-0630/25-0631, Dec 2025) ───────────────
+const KENMORE_WA: Record<CityCode, ZoningRule> = {
+  "R-1": { minLotSqft: null, maxDuPerAcre: 1, kind: "sf", allowsShortPlat: true,
+    codeSection: "Kenmore KMC 18.21.030 Table B · R-1", codeUrl: "https://ecode360.com/49600538",
+    envelope: { maxLotCoveragePct: 30, maxHeightFt: 35 }, verified: "secondary" },
+  "R-4": { minLotSqft: 7200, maxDuPerAcre: 4, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Kenmore KMC 18.21.030 Table B · R-4", codeUrl: "https://ecode360.com/49600538",
+    envelope: { maxLotCoveragePct: 55, maxImperviousPct: 45, maxHeightFt: 35 },
+    middleHousingUnitsPerLot: 2, verified: "secondary",
+    note: "Middle housing per KMC 18.21.035 (Ord. 25-0630/0631, 2025): min 2 units/lot; extraction indicates up to 4 — verify with the city." },
+  "R-6": { minLotSqft: 5400, maxDuPerAcre: 6, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Kenmore KMC 18.21.030 Table B · R-6", codeUrl: "https://ecode360.com/49600538",
+    envelope: { maxLotCoveragePct: 70, maxImperviousPct: 60, maxHeightFt: 35 },
+    middleHousingUnitsPerLot: 2, verified: "secondary" },
+  "R-12": { minLotSqft: null, maxDuPerAcre: 12, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Kenmore KMC 18.21 · R-12", codeUrl: "https://ecode360.com/49600538",
+    envelope: { maxLotCoveragePct: 85, maxHeightFt: 60 }, verified: "secondary" },
+  "R-18": { minLotSqft: null, maxDuPerAcre: 18, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Kenmore KMC 18.21 · R-18", codeUrl: "https://ecode360.com/49600538",
+    envelope: { maxLotCoveragePct: 85, maxHeightFt: 60 }, verified: "secondary" },
+  "R-24": { minLotSqft: null, maxDuPerAcre: 24, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Kenmore KMC 18.21 · R-24", codeUrl: "https://ecode360.com/49600538",
+    envelope: { maxLotCoveragePct: 85, maxHeightFt: 80 }, verified: "secondary" },
+  "R-48": { minLotSqft: null, maxDuPerAcre: 48, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Kenmore KMC 18.21 · R-48", codeUrl: "https://ecode360.com/49600538",
+    envelope: { maxLotCoveragePct: 90 }, verified: "secondary" },
+};
+
+// ─── Covington, WA — CMC 18.30.030 (added Jul 2026, table verified) ─────────
+// Min lot area is 2,500 sqft in ALL residential zones; density governs yield.
+const COVINGTON_WA: Record<CityCode, ZoningRule> = {
+  "R-1": { minLotSqft: 2500, maxDuPerAcre: 1, kind: "sf", allowsShortPlat: true,
+    codeSection: "Covington CMC 18.30.030 · R-1 Urban Separator",
+    codeUrl: "https://covington.municipal.codes/CMC/18.30.030",
+    envelope: { maxLotCoveragePct: 30, maxHeightFt: 35 }, verified: "verified",
+    note: "Urban separator: clustering required, plat impervious cap 8%; HB 1110 2-unit minimum does NOT apply to urban-separator lots." },
+  "R-4": { minLotSqft: 2500, maxDuPerAcre: 4, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Covington CMC 18.30.030 · R-4",
+    codeUrl: "https://covington.municipal.codes/CMC/18.30.030",
+    envelope: { maxLotCoveragePct: 55, maxHeightFt: 35 },
+    middleHousingUnitsPerLot: 2, verified: "verified",
+    note: "Ord. 04-25 (2025): min 2 units/lot (CMC 18.30.030(B)(21)); middle-housing base height 45 ft. Up to 6 du/ac with incentives." },
+  "R-6": { minLotSqft: 2500, maxDuPerAcre: 6, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Covington CMC 18.30.030 · R-6",
+    codeUrl: "https://covington.municipal.codes/CMC/18.30.030",
+    envelope: { maxLotCoveragePct: 70, maxHeightFt: 35 },
+    middleHousingUnitsPerLot: 2, verified: "verified" },
+  "R-8": { minLotSqft: 2500, maxDuPerAcre: 8, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Covington CMC 18.30.030 · R-8",
+    codeUrl: "https://covington.municipal.codes/CMC/18.30.030",
+    envelope: { maxLotCoveragePct: 75, maxHeightFt: 35 },
+    middleHousingUnitsPerLot: 2, verified: "verified" },
+  "R-12": { minLotSqft: 2500, maxDuPerAcre: 12, kind: "multifamily", allowsShortPlat: true,
+    codeSection: "Covington CMC 18.30.030 · R-12",
+    codeUrl: "https://covington.municipal.codes/CMC/18.30.030",
+    envelope: { maxLotCoveragePct: 75, maxHeightFt: 35 }, verified: "verified" },
+  "R-18": { minLotSqft: 2500, maxDuPerAcre: 18, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Covington CMC 18.30.030 · R-18",
+    codeUrl: "https://covington.municipal.codes/CMC/18.30.030",
+    envelope: { maxLotCoveragePct: 75, maxHeightFt: 35 }, verified: "verified" },
+  "MR": { minLotSqft: 2500, maxDuPerAcre: 14, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Covington CMC 18.30.030 · MR Multifamily",
+    codeUrl: "https://covington.municipal.codes/CMC/18.30.030",
+    envelope: { maxLotCoveragePct: 80, maxHeightFt: 60 }, verified: "verified",
+    note: "Up to 50 du/ac with incentives." },
+};
+
+// ─── Woodinville, WA — WMC 21.31.030 (Ord. 792, 2025 — units-per-lot) ───────
+const WOODINVILLE_WA: Record<CityCode, ZoningRule> = {
+  "R-1": { minLotSqft: 35000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Woodinville WMC 21.31.030 · R-1 (2 du/lot; +1 per extra 43,560 sqft)",
+    codeUrl: "https://www.codepublishing.com/WA/Woodinville/html/Woodinville21/Woodinville2131.html",
+    middleHousingUnitsPerLot: 2, verified: "verified" },
+  "R-4": { minLotSqft: 9000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Woodinville WMC 21.31.030 · R-4 (2 du/lot; +1 per extra 10,890 sqft)",
+    codeUrl: "https://www.codepublishing.com/WA/Woodinville/html/Woodinville21/Woodinville2131.html",
+    middleHousingUnitsPerLot: 2, verified: "verified" },
+  "R-6": { minLotSqft: 6000, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Woodinville WMC 21.31.030 · R-6 (3 du/lot; +1 per extra 7,260 sqft)",
+    codeUrl: "https://www.codepublishing.com/WA/Woodinville/html/Woodinville21/Woodinville2131.html",
+    middleHousingUnitsPerLot: 3, verified: "verified" },
+  "R-8": { minLotSqft: 5000, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Woodinville WMC 21.31.030 · R-8 (3 du/lot; +1 per extra 5,445 sqft)",
+    codeUrl: "https://www.codepublishing.com/WA/Woodinville/html/Woodinville21/Woodinville2131.html",
+    middleHousingUnitsPerLot: 3, verified: "verified" },
+  "R-12": { minLotSqft: 3600, maxDuPerAcre: null, kind: "multifamily", allowsShortPlat: true,
+    codeSection: "Woodinville WMC 21.31.030 · R-12 (3 du/lot base; +1 per extra 3,630 sqft)",
+    codeUrl: "https://www.codepublishing.com/WA/Woodinville/html/Woodinville21/Woodinville2131.html",
+    middleHousingUnitsPerLot: 3, verified: "verified" },
+  "R-18": { minLotSqft: 2400, maxDuPerAcre: null, kind: "multifamily", allowsShortPlat: true,
+    codeSection: "Woodinville WMC 21.31.030 · R-18 (+1 per extra 2,420 sqft)",
+    codeUrl: "https://www.codepublishing.com/WA/Woodinville/html/Woodinville21/Woodinville2131.html",
+    middleHousingUnitsPerLot: 3, verified: "verified" },
+  "R-24": { minLotSqft: 1700, maxDuPerAcre: null, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Woodinville WMC 21.31.030 · R-24 (min 3 du/lot; SF/duplex prohibited)",
+    codeUrl: "https://www.codepublishing.com/WA/Woodinville/html/Woodinville21/Woodinville2131.html",
+    verified: "verified" },
+  "R-48": { minLotSqft: 900, maxDuPerAcre: null, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Woodinville WMC 21.31.030 · R-48 (+1 per extra 907 sqft)",
+    codeUrl: "https://www.codepublishing.com/WA/Woodinville/html/Woodinville21/Woodinville2131.html",
+    verified: "verified" },
+};
+
+// ─── Lake Forest Park, WA — LFPMC Title 18 (Ord. 1310, 2025) ────────────────
+const LAKE_FOREST_PARK_WA: Record<CityCode, ZoningRule> = {
+  "R-20": { minLotSqft: 20000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "LFPMC 18.16.030 · R-20 Residential Low",
+    codeUrl: "https://www.codepublishing.com/WA/LakeForestPark/html/LakeForestPark18/LakeForestPark1816.html",
+    envelope: { maxLotCoveragePct: 25, maxImperviousPct: 35, maxHeightFt: 30 },
+    middleHousingUnitsPerLot: 2, verified: "verified",
+    note: "SF + one 2-unit middle-housing dwelling per lot (Ord. 1310, 2025)." },
+  "R-15": { minLotSqft: 15000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "LFPMC 18.18 · R-15 Residential Low/Moderate",
+    codeUrl: "https://www.codepublishing.com/WA/LakeForestPark/html/LakeForestPark18/LakeForestPark1818.html",
+    middleHousingUnitsPerLot: 2, verified: "unverified",
+    note: "Min lot inferred from zone name — verify LFPMC 18.18 before relying on a split." },
+  "R-10": { minLotSqft: 10000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "LFPMC 18.20.030 · R-10 Residential Moderate/High",
+    codeUrl: "https://www.codepublishing.com/WA/LakeForestPark/html/LakeForestPark18/LakeForestPark1820.html",
+    envelope: { maxLotCoveragePct: 30, maxImperviousPct: 45, maxHeightFt: 30 },
+    middleHousingUnitsPerLot: 2, verified: "verified" },
+  "R-7.2": { minLotSqft: 7200, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "LFPMC 18.21 · R-7.2",
+    codeUrl: "https://www.codepublishing.com/WA/LakeForestPark/html/LakeForestPark18/LakeForestPark1821.html",
+    middleHousingUnitsPerLot: 2, verified: "unverified",
+    note: "Min lot inferred from zone name — verify LFPMC 18.21 before relying on a split." },
+};
+
+// ─── Normandy Park, WA — NPMC 18.32 ─────────────────────────────────────────
+const NORMANDY_PARK_WA: Record<CityCode, ZoningRule> = {
+  "R-7.2": { minLotSqft: 7200, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Normandy Park NPMC 18.32 · R-7.2",
+    codeUrl: "https://www.codepublishing.com/WA/NormandyPark/html/NormandyPark18/NormandyPark1832.html",
+    envelope: { maxLotCoveragePct: 35, maxHeightFt: 30 },
+    middleHousingUnitsPerLot: 2, verified: "unverified",
+    note: "One extraction showed a reduced 4,800 sqft post-middle-housing minimum — verify NPMC 18.32 with the city." },
+  "R-12.5": { minLotSqft: 12500, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Normandy Park NPMC 18.32 · R-12.5",
+    codeUrl: "https://www.codepublishing.com/WA/NormandyPark/html/NormandyPark18/NormandyPark1832.html",
+    envelope: { maxLotCoveragePct: 35, maxHeightFt: 30 },
+    middleHousingUnitsPerLot: 2, verified: "unverified" },
+  "R-15": { minLotSqft: 15000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Normandy Park NPMC 18.32 · R-15",
+    codeUrl: "https://www.codepublishing.com/WA/NormandyPark/html/NormandyPark18/NormandyPark1832.html",
+    envelope: { maxLotCoveragePct: 30, maxHeightFt: 30 },
+    middleHousingUnitsPerLot: 2, verified: "secondary" },
+  "R-20": { minLotSqft: 20000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Normandy Park NPMC 18.32 · R-20",
+    codeUrl: "https://www.codepublishing.com/WA/NormandyPark/html/NormandyPark18/NormandyPark1832.html",
+    envelope: { maxLotCoveragePct: 30, maxHeightFt: 30 },
+    middleHousingUnitsPerLot: 2, verified: "secondary" },
+};
+
+// ─── Enumclaw, WA — EMC 18.06.030 (outside contiguous UGA — no HB 1110) ─────
+const ENUMCLAW_WA: Record<CityCode, ZoningRule> = {
+  "R-1": { minLotSqft: 15000, maxDuPerAcre: null, kind: "sf", allowsShortPlat: true,
+    codeSection: "Enumclaw EMC 18.06.030 · R-1",
+    codeUrl: "https://cityofenumclaw.net/DocumentCenter/View/8429/5-Appendix_E---EMC-18-06-030",
+    envelope: { maxLotCoveragePct: 30, maxHeightFt: 30 }, verified: "verified" },
+  "R-2": { minLotSqft: 8400, maxDuPerAcre: null, kind: "sf", allowsShortPlat: true,
+    codeSection: "Enumclaw EMC 18.06.030 · R-2",
+    codeUrl: "https://cityofenumclaw.net/DocumentCenter/View/8429/5-Appendix_E---EMC-18-06-030",
+    envelope: { maxLotCoveragePct: 40, maxHeightFt: 30 }, verified: "verified",
+    note: "Max lot 18,000 sqft; one 7,500 sqft lot allowed per short plat." },
+  "R-3": { minLotSqft: 6200, maxDuPerAcre: 7, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Enumclaw EMC 18.06.030 · R-3",
+    codeUrl: "https://cityofenumclaw.net/DocumentCenter/View/8429/5-Appendix_E---EMC-18-06-030",
+    envelope: { maxLotCoveragePct: 40, maxHeightFt: 30 }, verified: "verified",
+    note: "Duplex/cottage at 3,100 sqft per unit via CUP; max lot 12,500 sqft." },
+  "R-4": { minLotSqft: 6200, maxDuPerAcre: 15, kind: "multifamily", allowsShortPlat: true,
+    codeSection: "Enumclaw EMC 18.06.030 · R-4",
+    codeUrl: "https://cityofenumclaw.net/DocumentCenter/View/8429/5-Appendix_E---EMC-18-06-030",
+    envelope: { maxLotCoveragePct: 40, maxHeightFt: 30 }, verified: "verified",
+    note: "≈1 DU/2,900 sqft (~15 du/ac); 30 du/ac senior housing by CUP." },
+};
+
+// ─── Duvall, WA — DMC 14.12 (SF), 14.14 (R12), 14.16 (R20) ──────────────────
+const DUVALL_WA: Record<CityCode, ZoningRule> = {
+  "R4": { minLotSqft: 6000, maxDuPerAcre: 4, kind: "sf", allowsShortPlat: true,
+    codeSection: "Duvall DMC 14.12.050 · R4",
+    codeUrl: "https://library.municode.com/wa/duvall/codes/code_of_ordinances",
+    envelope: { maxHeightFt: 30 }, verified: "secondary" },
+  "R4.5": { minLotSqft: 5600, maxDuPerAcre: 4.5, kind: "sf", allowsShortPlat: true,
+    codeSection: "Duvall DMC 14.12.060 · R4.5",
+    codeUrl: "https://library.municode.com/wa/duvall/codes/code_of_ordinances",
+    envelope: { maxHeightFt: 30 }, verified: "secondary" },
+  "R6": { minLotSqft: 5000, maxDuPerAcre: 6, kind: "sf", allowsShortPlat: true,
+    codeSection: "Duvall DMC 14.12.070 · R6",
+    codeUrl: "https://library.municode.com/wa/duvall/codes/code_of_ordinances",
+    envelope: { maxHeightFt: 30 }, verified: "secondary" },
+  "R8": { minLotSqft: 4000, maxDuPerAcre: 8, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Duvall DMC 14.12.080 · R8",
+    codeUrl: "https://library.municode.com/wa/duvall/codes/code_of_ordinances",
+    envelope: { maxHeightFt: 30 }, verified: "secondary" },
+  "R12": { minLotSqft: 2500, maxDuPerAcre: 12, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Duvall DMC 14.14 · R12 Multi-Family (min density 8 du/ac)",
+    codeUrl: "https://www.duvallwa.gov/DocumentCenter/View/4192/Code-Chapters",
+    envelope: { maxLotCoveragePct: 60, maxHeightFt: 35 }, verified: "verified" },
+  "R20": { minLotSqft: 2250, maxDuPerAcre: 20, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Duvall DMC 14.16 · R20 Multi-Family (min density 14 du/ac)",
+    codeUrl: "https://www.duvallwa.gov/DocumentCenter/View/4192/Code-Chapters",
+    envelope: { maxLotCoveragePct: 75, maxHeightFt: 35 }, verified: "verified" },
+};
+
+// ─── Carnation, WA — CMC 15.48 (secondary-source — spot-check) ──────────────
+const CARNATION_WA: Record<CityCode, ZoningRule> = {
+  "R-4": { minLotSqft: 10000, maxDuPerAcre: 4, kind: "sf", allowsShortPlat: true,
+    codeSection: "Carnation CMC 15.48 · R-4", codeUrl: "https://library.municode.com/wa/carnation/codes/code_of_ordinances",
+    envelope: { maxLotCoveragePct: 35, maxHeightFt: 30 }, verified: "secondary" },
+  "R-6": { minLotSqft: 6000, maxDuPerAcre: 6, kind: "sf", allowsShortPlat: true,
+    codeSection: "Carnation CMC 15.48 · R-6", codeUrl: "https://library.municode.com/wa/carnation/codes/code_of_ordinances",
+    envelope: { maxLotCoveragePct: 40, maxHeightFt: 35 }, verified: "secondary" },
+  "R-8": { minLotSqft: 5000, maxDuPerAcre: 8, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Carnation CMC 15.48 · R-8", codeUrl: "https://library.municode.com/wa/carnation/codes/code_of_ordinances",
+    envelope: { maxLotCoveragePct: 45, maxHeightFt: 35 }, verified: "secondary" },
+  "R-15": { minLotSqft: 3000, maxDuPerAcre: 15, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Carnation CMC 15.48 · R-15", codeUrl: "https://library.municode.com/wa/carnation/codes/code_of_ordinances",
+    envelope: { maxLotCoveragePct: 50, maxHeightFt: 35 }, verified: "secondary" },
+  "R-20": { minLotSqft: 2500, maxDuPerAcre: 20, kind: "multifamily", allowsShortPlat: false,
+    codeSection: "Carnation CMC 15.48 · R-20", codeUrl: "https://library.municode.com/wa/carnation/codes/code_of_ordinances",
+    envelope: { maxLotCoveragePct: 55, maxHeightFt: 35 }, verified: "secondary" },
+};
+
+// ─── Black Diamond, WA — BDMC 18.30.040 ─────────────────────────────────────
+const BLACK_DIAMOND_WA: Record<CityCode, ZoningRule> = {
+  "R4": { minLotSqft: 9600, maxDuPerAcre: 4, kind: "sf", allowsShortPlat: true,
+    codeSection: "Black Diamond BDMC 18.30.040 · R4 (Ord. 17-1089)",
+    codeUrl: "https://library.municode.com/wa/black_diamond/codes/code_of_ordinances",
+    envelope: { maxImperviousPct: 70, maxHeightFt: 32 }, verified: "verified" },
+  "R6": { minLotSqft: 7200, maxDuPerAcre: 6, kind: "sf", allowsShortPlat: true,
+    codeSection: "Black Diamond BDMC 18.30.040 · R6",
+    codeUrl: "https://library.municode.com/wa/black_diamond/codes/code_of_ordinances",
+    envelope: { maxImperviousPct: 70, maxHeightFt: 32 }, verified: "secondary" },
+  "MPD": { minLotSqft: null, maxDuPerAcre: null, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Black Diamond BDMC 18.98 · Master Planned Development overlay",
+    codeUrl: "https://library.municode.com/wa/black_diamond/codes/code_of_ordinances",
+    verified: "unverified",
+    note: "MPD parcels (Ten Trails) use the MPD permit's own lot standards, not BDMC 18.30.040." },
+};
+
+// ─── Pacific, WA — PMC Title 20 (UNVERIFIED placeholders) ───────────────────
+const PACIFIC_WA: Record<CityCode, ZoningRule> = {
+  "RS": { minLotSqft: 7200, maxDuPerAcre: 6, kind: "sf", allowsShortPlat: true,
+    codeSection: "Pacific PMC Title 20 · RS Single-Family (UNVERIFIED — confirm with city)",
+    codeUrl: "https://www.codepublishing.com/WA/Pacific/", verified: "unverified" },
+  "MDR": { minLotSqft: null, maxDuPerAcre: 8, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Pacific PMC Title 20 · Medium Density Residential (UNVERIFIED — comp-plan avg density)",
+    codeUrl: "https://www.codepublishing.com/WA/Pacific/", verified: "unverified" },
+};
+
+// ─── Algona, WA — AMC 22.24.060 (single residential district) ───────────────
+const ALGONA_WA: Record<CityCode, ZoningRule> = {
+  "R": { minLotSqft: 4000, maxDuPerAcre: 17, kind: "sf_attached", allowsShortPlat: true,
+    codeSection: "Algona AMC 22.24.060 · Residential (Ord. 1255-25)",
+    codeUrl: "https://algona.municipal.codes/Code/22.24.060",
+    envelope: { maxLotCoveragePct: 65, maxHeightFt: 25 },
+    middleHousingUnitsPerLot: 2, verified: "verified",
+    note: "Min lot 4,000; max 17 du/ac (SF detached capped at 8 du/ac). Middle housing/ADU height 36 ft when stacked over garage; base 25 ft." },
+};
+
+// ─── Medina, WA — MMC Title 16 ──────────────────────────────────────────────
+const MEDINA_WA: Record<CityCode, ZoningRule> = {
+  "R-16": { minLotSqft: 16000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Medina MMC 16.73 · R-16 (16,000 sqft min lot)",
+    codeUrl: "https://library.municode.com/wa/medina/codes/code_of_ordinances",
+    middleHousingUnitsPerLot: 2, verified: "verified",
+    note: "HB 1110 Tier 3: 2 units/lot required." },
+  "R-20": { minLotSqft: 20000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Medina MMC Title 16 · R-20 (20,000 sqft min lot)",
+    codeUrl: "https://library.municode.com/wa/medina/codes/code_of_ordinances",
+    middleHousingUnitsPerLot: 2, verified: "verified" },
+  "R-30": { minLotSqft: 30000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Medina MMC 16.73 · R-30 (30,000 sqft min lot)",
+    codeUrl: "https://library.municode.com/wa/medina/codes/code_of_ordinances",
+    middleHousingUnitsPerLot: 2, verified: "verified" },
+};
+
+// ─── Clyde Hill, WA — CHMC 17.16 ────────────────────────────────────────────
+const CLYDE_HILL_WA: Record<CityCode, ZoningRule> = {
+  "R-1": { minLotSqft: 20000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Clyde Hill CHMC 17.16.030 · R-1 (20,000 sqft min building site)",
+    codeUrl: "https://ecode360.com/CL4436",
+    middleHousingUnitsPerLot: 2, verified: "verified",
+    note: "Min frontage 100 ft. HB 1110 Tier 3: 2 units/lot (2025 middle-housing/ADU updates adopted)." },
+};
+
+// ─── Yarrow Point, WA — YPMC 17.16 ──────────────────────────────────────────
+const YARROW_POINT_WA: Record<CityCode, ZoningRule> = {
+  "R-12": { minLotSqft: 12000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Yarrow Point YPMC 17.16 · R-12",
+    codeUrl: "https://www.codepublishing.com/WA/YarrowPoint/html/YarrowPoint17/YarrowPoint1716.html",
+    envelope: { maxLotCoveragePct: 30, maxImperviousPct: 60 },
+    middleHousingUnitsPerLot: 2, verified: "secondary" },
+  "R-15": { minLotSqft: 15000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Yarrow Point YPMC 17.16 · R-15",
+    codeUrl: "https://www.codepublishing.com/WA/YarrowPoint/html/YarrowPoint17/YarrowPoint1716.html",
+    middleHousingUnitsPerLot: 2, verified: "unverified",
+    note: "Min lot inferred from zone name — verify YPMC 17.16." },
+};
+
+// ─── Hunts Point, WA — HPMC Title 18 ────────────────────────────────────────
+const HUNTS_POINT_WA: Record<CityCode, ZoningRule> = {
+  "R-40": { minLotSqft: 40000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Hunts Point HPMC 18.31 · R-40",
+    codeUrl: "https://ecode360.com/48429425",
+    middleHousingUnitsPerLot: 2, verified: "unverified",
+    note: "Zone verified; 40,000 sqft min inferred from zone name — verify HPMC 18.31." },
+  "R-20A": { minLotSqft: 20000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Hunts Point HPMC 18.38 · R-20A Flex",
+    codeUrl: "https://ecode360.com/48429612",
+    middleHousingUnitsPerLot: 2, verified: "unverified" },
+};
+
+// ─── Beaux Arts Village, WA — single residential zone ───────────────────────
+const BEAUX_ARTS_WA: Record<CityCode, ZoningRule> = {
+  "R": { minLotSqft: 10000, maxDuPerAcre: null, kind: "duplex", allowsShortPlat: true,
+    codeSection: "Beaux Arts Village · single residential zone (min lot 10,000, 2025–2045 Comp Plan)",
+    codeUrl: "https://beauxarts-wa.gov/documents/153/241230_TBA_Comprehensive_Plan_Final.pdf",
+    middleHousingUnitsPerLot: 2, verified: "verified",
+    note: "HB 1110 Tier 3: 2 units/lot; no higher middle-housing mandate." },
+};
+
 // Registry keyed by "STATE|CITY". Extend by dropping a table here.
 // Unincorporated KC uses a synthetic city key "KING COUNTY".
 const REGISTRY: Record<string, Record<CityCode, ZoningRule>> = {
@@ -572,6 +979,25 @@ const REGISTRY: Record<string, Record<CityCode, ZoningRule>> = {
   "WA|SNOQUALMIE": SNOQUALMIE_WA,
   "WA|NORTH BEND": NORTH_BEND_WA,
   "WA|KING COUNTY": KING_COUNTY_UNINC,
+  // Added Jul 2026 — full-county coverage pass:
+  "WA|DES MOINES": DES_MOINES_WA,
+  "WA|KENMORE": KENMORE_WA,
+  "WA|COVINGTON": COVINGTON_WA,
+  "WA|WOODINVILLE": WOODINVILLE_WA,
+  "WA|LAKE FOREST PARK": LAKE_FOREST_PARK_WA,
+  "WA|NORMANDY PARK": NORMANDY_PARK_WA,
+  "WA|ENUMCLAW": ENUMCLAW_WA,
+  "WA|DUVALL": DUVALL_WA,
+  "WA|CARNATION": CARNATION_WA,
+  "WA|BLACK DIAMOND": BLACK_DIAMOND_WA,
+  "WA|PACIFIC": PACIFIC_WA,
+  "WA|ALGONA": ALGONA_WA,
+  "WA|MEDINA": MEDINA_WA,
+  "WA|CLYDE HILL": CLYDE_HILL_WA,
+  "WA|YARROW POINT": YARROW_POINT_WA,
+  "WA|HUNTS POINT": HUNTS_POINT_WA,
+  "WA|BEAUX ARTS": BEAUX_ARTS_WA,
+  "WA|BEAUX ARTS VILLAGE": BEAUX_ARTS_WA,
 };
 
 function normalize(s: string | null | undefined): string {

@@ -32,6 +32,7 @@ import PermitRadar from "@/components/PermitRadar";
 import LenderReport from "@/components/LenderReport";
 import DownloadReportButton from "@/components/DownloadReportButton";
 import FeasibilityReasoningModal from "@/components/FeasibilityReasoningModal";
+import ScenarioBoard from "@/components/ScenarioBoard";
 import {
   useStore,
   Strategy,
@@ -57,7 +58,7 @@ import {
   calculateMultiFamilyAnalysis,
   getMarketRentDefaults,
 } from "@/lib/calculations";
-import type { TypologyBucket } from "@/lib/buildability";
+import type { TypologyBucket, Comp } from "@/lib/buildability";
 
 // ─── Icons ───────────────────────────────────────────────────────────────────
 
@@ -133,6 +134,45 @@ const TYPOLOGY_COLORS: Record<TypologyBucket, string> = {
   triplex: "bg-indigo-500", fourplex: "bg-violet-500", five_plus: "bg-purple-500",
   condo: "bg-pink-500", other: "bg-gray-400",
 };
+
+// ─── Strategy-matched comparable sales helpers ───────────────────────────────
+
+const COMP_STRATEGY_LABEL: Partial<Record<Strategy, string>> = {
+  fresh_build:  "new-construction",
+  split_build:  "new-construction",
+  flip_fix:     "fix-and-flip",
+  main_adu:     "ADU",
+  townhome:     "townhome",
+  multifamily:  "multi-family",
+};
+
+const STRATEGY_COMP_MIN = 3;   // minimum matched comps before we widen the radius
+
+function isStrategyMatchedComp(c: Comp, strategy: Strategy): boolean {
+  const currentYear = new Date().getFullYear();
+  switch (strategy) {
+    case "fresh_build":
+    case "split_build":
+      // New build sold after recent construction (yearBuilt ≥ saleYear − 10)
+      return !!c.isNewConstructionAtSale;
+    case "flip_fix":
+      // True flip: bought and re-sold within 6–24 months
+      if (c.buyHoldMonths !== undefined && c.buyHoldMonths >= 6 && c.buyHoldMonths <= 24)
+        return true;
+      // Proxy: older home (>15 yrs) sold recently — likely a renovation comp
+      return !!(c.yearBuilt && c.yearBuilt < currentYear - 15);
+    case "main_adu":
+      return c.typology === "sfr_with_adu";
+    case "townhome":
+      return c.typology === "duplex" || !!c.principalUse?.toLowerCase().includes("townhome");
+    case "multifamily":
+      return (["duplex", "triplex", "fourplex", "five_plus"] as Comp["typology"][]).includes(
+        c.typology
+      );
+    default:
+      return false;
+  }
+}
 
 // ─── Number input helper ──────────────────────────────────────────────────────
 
@@ -1212,6 +1252,32 @@ export default function PropertyAnalysis() {
 
   // Rent comps are pre-seeded from ZIP table; user refreshes manually via APIllow button.
 
+  // ── Strategy-matched comparable sales ──────────────────────────────────────
+  // Priority: 0.5 mi radius strategy-match → 1.0 mi strategy-match → all comps
+  const strategyComps = useMemo(() => {
+    const sales = property?.neighborhood?.sales ?? [];
+    if (!activeStrategy || activeStrategy === "pass" || sales.length === 0) {
+      return { comps: sales, isStrategyFiltered: false, radiusMiles: null as number | null };
+    }
+    const hasDist = sales.some((c) => c.distanceMiles !== undefined);
+    if (hasDist) {
+      for (const radiusMiles of [0.5, 1.0] as const) {
+        const inRadius = sales.filter((c) => (c.distanceMiles ?? 99) <= radiusMiles);
+        const matched = inRadius.filter((c) => isStrategyMatchedComp(c, activeStrategy));
+        if (matched.length >= STRATEGY_COMP_MIN) {
+          return { comps: matched, isStrategyFiltered: true, radiusMiles };
+        }
+      }
+    } else {
+      // Older persisted data has no distanceMiles — fall back to strategy-only filter
+      const matched = sales.filter((c) => isStrategyMatchedComp(c, activeStrategy));
+      if (matched.length >= STRATEGY_COMP_MIN) {
+        return { comps: matched, isStrategyFiltered: true, radiusMiles: null };
+      }
+    }
+    return { comps: sales, isStrategyFiltered: false, radiusMiles: null };
+  }, [property?.neighborhood?.sales, activeStrategy]);
+
   const updateOverride = (strategy: Strategy, field: keyof StrategyOverrides, value: number | undefined) => {
     setStrategyOverrides((prev) => ({ ...prev, [strategy]: { ...prev[strategy], [field]: value } }));
   };
@@ -1323,8 +1389,22 @@ export default function PropertyAnalysis() {
           </div>
         )}
 
-        {/* ── Controls — Quality tier + Financing ────────────────────────────── */}
-        <div className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-2xl p-4 mb-5">
+        {/* ── Scenario Optimizer — verdict-first best play ──────────────────── */}
+        {effectiveProperty && (
+          <ScenarioBoard
+            property={effectiveProperty}
+            tier={qualityTier}
+            costPerSqft={costPerSqft}
+            financing={financing}
+          />
+        )}
+
+        {/* ── Controls — Quality tier + Financing ──────────────────────────────
+            Collapsed by default in the verdict-first layout: the optimizer
+            above re-runs live whenever these assumptions change. */}
+        <div className="mb-5">
+        <Accordion label="Assumptions — quality, cost & financing">
+        <div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             <div>
               <label className="text-xs font-semibold text-gray-600 dark:text-gray-400 mb-2 block">Construction Quality</label>
@@ -1518,6 +1598,15 @@ export default function PropertyAnalysis() {
             </p>
           </div>
         </div>
+        </Accordion>
+        </div>
+
+        {/* ── Strategy Workbench header ──────────────────────────────────────── */}
+        <div className="flex items-center gap-2 mb-3 px-1">
+          <div className="h-px flex-1 bg-gray-200 dark:bg-slate-700" />
+          <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Strategy workbench — fine-tune one play</p>
+          <div className="h-px flex-1 bg-gray-200 dark:bg-slate-700" />
+        </div>
 
         {/* ── Strategy Rail ──────────────────────────────────────────────────── */}
         <div className="flex gap-2 overflow-x-auto scrollbar-hide mb-4 pb-1 -mx-4 px-4">
@@ -1668,9 +1757,20 @@ export default function PropertyAnalysis() {
           )}
 
           {/* Comparable sales */}
-          {property.neighborhood && property.neighborhood.sales.length > 0 && (
-            <Accordion label={`📋 Comparable Sales (${property.neighborhood.sales.length})`}>
+          {property.neighborhood && property.neighborhood.sales.length > 0 && (() => {
+            const stratLabel = COMP_STRATEGY_LABEL[activeStrategy];
+            const accordionLabel = strategyComps.isStrategyFiltered && stratLabel
+              ? `📋 ${stratLabel.charAt(0).toUpperCase() + stratLabel.slice(1)} Comps (${strategyComps.comps.length}${strategyComps.radiusMiles != null ? ` · ${strategyComps.radiusMiles} mi` : ""})`
+              : `📋 Comparable Sales (${strategyComps.comps.length})`;
+            return (
+            <Accordion label={accordionLabel}>
               <div className="overflow-x-auto -mx-5 px-5">
+                {/* Fallback notice */}
+                {!strategyComps.isStrategyFiltered && activeStrategy && activeStrategy !== "pass" && stratLabel && (
+                  <div className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/40 px-3 py-2 rounded-lg mb-3">
+                    No {stratLabel} comps found within 1 mi — showing all nearby sales
+                  </div>
+                )}
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="text-left text-[10px] uppercase tracking-wider text-gray-400 border-b border-gray-100 dark:border-slate-700">
@@ -1679,48 +1779,75 @@ export default function PropertyAnalysis() {
                       <th className="py-2 pr-3 font-medium text-right">Price</th>
                       <th className="py-2 pr-3 font-medium text-right">Sqft</th>
                       <th className="py-2 pr-3 font-medium text-right">$/sqft</th>
-                      <th className="py-2 pr-3 font-medium">Type</th>
+                      <th className="py-2 pr-3 font-medium">Signal</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {property.neighborhood.sales.map((c) => (
-                      <tr
-                        key={c.pin + c.saleDate}
-                        className="border-b border-gray-50 dark:border-slate-700/50 last:border-0 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors cursor-pointer"
-                        onClick={() => c.sourceUrl && window.open(c.sourceUrl, "_blank", "noopener,noreferrer")}
-                      >
-                        <td className="py-2 pr-3">
-                          <span className="text-blue-600 dark:text-blue-400 inline-flex items-center gap-1">
-                            {c.address.split(",")[0]} <ExternalLink size={9} className="opacity-60 flex-shrink-0" />
-                          </span>
-                          {c.parcelViewerUrl && (
-                            <a
-                              href={c.parcelViewerUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="ml-1.5 text-[10px] text-gray-400 hover:text-blue-500 underline"
-                            >
-                              parcel
-                            </a>
-                          )}
-                        </td>
-                        <td className="py-2 pr-3 text-gray-600 dark:text-gray-400">{formatSaleDate(c.saleDate)}</td>
-                        <td className="py-2 pr-3 text-right font-medium text-gray-900 dark:text-white">{formatCurrency(c.salePrice)}</td>
-                        <td className="py-2 pr-3 text-right text-gray-600">{c.sqftLiving ? c.sqftLiving.toLocaleString() : "—"}</td>
-                        <td className="py-2 pr-3 text-right text-gray-600">{c.pricePerSqft ? `$${c.pricePerSqft}` : "—"}</td>
-                        <td className="py-2 pr-3">
+                    {strategyComps.comps.map((c) => {
+                      // Determine the signal badge for this comp
+                      const currentYear = new Date().getFullYear();
+                      const isFlip = c.buyHoldMonths !== undefined && c.buyHoldMonths >= 6 && c.buyHoldMonths <= 24;
+                      const isNewBuild = !!c.isNewConstructionAtSale;
+                      const isOlder = !!(c.yearBuilt && c.yearBuilt < currentYear - 15);
+                      let signalBadge: React.ReactNode = null;
+                      if (activeStrategy === "fresh_build" || activeStrategy === "split_build") {
+                        signalBadge = isNewBuild
+                          ? <span className="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-green-100 text-green-700">New build</span>
+                          : <span className="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-gray-100 text-gray-500">Resale</span>;
+                      } else if (activeStrategy === "flip_fix") {
+                        signalBadge = isFlip
+                          ? <span className="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-100 text-amber-700" title={`Held ${c.buyHoldMonths} mo`}>Flip ({c.buyHoldMonths}mo)</span>
+                          : isOlder
+                          ? <span className="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-orange-50 text-orange-600">Older ({c.yearBuilt})</span>
+                          : <span className="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-gray-100 text-gray-500">General</span>;
+                      } else {
+                        signalBadge = (
                           <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full text-white ${TYPOLOGY_COLORS[c.typology]}`}>
                             {TYPOLOGY_LABELS[c.typology]}
                           </span>
-                        </td>
-                      </tr>
-                    ))}
+                        );
+                      }
+                      return (
+                        <tr
+                          key={c.pin + c.saleDate}
+                          className="border-b border-gray-50 dark:border-slate-700/50 last:border-0 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors cursor-pointer"
+                          onClick={() => c.sourceUrl && window.open(c.sourceUrl, "_blank", "noopener,noreferrer")}
+                        >
+                          <td className="py-2 pr-3">
+                            <span className="text-blue-600 dark:text-blue-400 inline-flex items-center gap-1">
+                              {c.address.split(",")[0]} <ExternalLink size={9} className="opacity-60 flex-shrink-0" />
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              {c.parcelViewerUrl && (
+                                <a
+                                  href={c.parcelViewerUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-[10px] text-gray-400 hover:text-blue-500 underline"
+                                >
+                                  parcel
+                                </a>
+                              )}
+                              {c.distanceMiles != null && (
+                                <span className="text-[10px] text-gray-400">{c.distanceMiles} mi</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-2 pr-3 text-gray-600 dark:text-gray-400">{formatSaleDate(c.saleDate)}</td>
+                          <td className="py-2 pr-3 text-right font-medium text-gray-900 dark:text-white">{formatCurrency(c.salePrice)}</td>
+                          <td className="py-2 pr-3 text-right text-gray-600">{c.sqftLiving ? c.sqftLiving.toLocaleString() : "—"}</td>
+                          <td className="py-2 pr-3 text-right text-gray-600">{c.pricePerSqft ? `$${c.pricePerSqft}` : "—"}</td>
+                          <td className="py-2 pr-3">{signalBadge}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             </Accordion>
-          )}
+            );
+          })()}
 
           {/* AI Narrator */}
           {coreAnalyses.length > 0 && (

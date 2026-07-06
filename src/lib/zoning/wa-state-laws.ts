@@ -63,10 +63,27 @@ const HB1110_TIER2_KC = new Set([
   "WOODINVILLE",
 ]);
 
-// Cities below 25k or unincorporated KC: HB 1110 does not apply.
-// (Newcastle, Snoqualmie, North Bend, Carnation, Duvall, Pacific, Algona,
-//  Black Diamond, Skykomish, Beaux Arts, Hunts Point, Yarrow Point, Medina,
-//  Clyde Hill, and all unincorporated parcels.)
+/** Tier 3 (RCW 36.70A.635(1)(a)): cities <25k inside the contiguous UGA of a
+ *  county whose largest city is ≥275k (Seattle). Must allow 2 units per lot.
+ *  Verified against 2025 middle-housing adoptions (Ord. 1310 LFP, CHMC updates,
+ *  YPMC 17.16, Algona Ord. 1255-25, etc.). */
+const HB1110_TIER3_KC = new Set([
+  "NEWCASTLE",
+  "LAKE FOREST PARK",
+  "NORMANDY PARK",
+  "ALGONA",
+  "PACIFIC",
+  "MEDINA",
+  "CLYDE HILL",
+  "YARROW POINT",
+  "HUNTS POINT",
+  "BEAUX ARTS",
+  "BEAUX ARTS VILLAGE",
+]);
+
+// Cities outside the contiguous KC UGA: HB 1110 does not apply.
+// (Snoqualmie, North Bend, Carnation, Duvall, Enumclaw, Black Diamond,
+//  Skykomish, and all unincorporated parcels.)
 
 // ─── HB 1110 effect ──────────────────────────────────────────────────────────
 
@@ -110,7 +127,10 @@ export function getMiddleHousingOverlay(
     "https://app.leg.wa.gov/RCW/default.aspx?cite=36.70A.635"; // RCW 36.70A.635 (codified HB 1110)
 
   if (HB1110_TIER1_KC.has(c)) {
-    const maxUnits = nearMajorTransit ? 6 : 4;
+    const maxUnits = Math.max(
+      nearMajorTransit ? 6 : 4,
+      baseRule.middleHousingUnitsPerLot ?? 0,
+    );
     return {
       statute: "HB 1110 (Tier 1)",
       maxUnitsPerLot: maxUnits,
@@ -123,13 +143,29 @@ export function getMiddleHousingOverlay(
     };
   }
   if (HB1110_TIER2_KC.has(c)) {
+    const maxUnits = Math.max(
+      nearMajorTransit ? 4 : 2,
+      baseRule.middleHousingUnitsPerLot ?? 0,
+    );
     return {
       statute: "HB 1110 (Tier 2)",
-      maxUnitsPerLot: 2,
+      maxUnitsPerLot: maxUnits,
       transitProximity: nearMajorTransit,
       explanation:
-        `${city} is a Tier 2 city under WA HB 1110 — every residential lot must allow at least 2 units ` +
-        `(duplex), regardless of the local single-family zoning. This pre-empts ${baseRule.codeSection}.`,
+        `${city} is a Tier 2 city under WA HB 1110 — every residential lot must allow at least ${maxUnits} units, ` +
+        `regardless of the local single-family zoning. This pre-empts ${baseRule.codeSection}.`,
+      codeUrl,
+    };
+  }
+  if (HB1110_TIER3_KC.has(c)) {
+    const maxUnits = Math.max(2, baseRule.middleHousingUnitsPerLot ?? 0);
+    return {
+      statute: "HB 1110 (Tier 2)", // rendered label kept stable; tier 3 shares the 2-unit floor
+      maxUnitsPerLot: maxUnits,
+      transitProximity: nearMajorTransit,
+      explanation:
+        `${city} is a Tier 3 city under WA HB 1110 (under 25k population inside the contiguous King County UGA) — ` +
+        `every residential lot must allow at least ${maxUnits} units. This pre-empts ${baseRule.codeSection}.`,
       codeUrl,
     };
   }
