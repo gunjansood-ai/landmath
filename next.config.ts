@@ -5,15 +5,6 @@ const nextConfig: NextConfig = {
   // .next dir sits on a FUSE mount that can't unlink hidden files). Defaults
   // to .next everywhere else — no effect on Vercel.
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  images: {
-    remotePatterns: [
-      {
-        // Google profile photos (used in nav user avatar)
-        protocol: "https",
-        hostname: "lh3.googleusercontent.com",
-      },
-    ],
-  },
 };
 
 export default nextConfig;

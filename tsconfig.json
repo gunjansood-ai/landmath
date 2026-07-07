@@ -36,7 +36,9 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts",
     "/tmp/landmath-build/types/**/*.ts",
-    "/tmp/landmath-build/dev/types/**/*.ts"
+    "/tmp/landmath-build/dev/types/**/*.ts",
+    "tmp/build/types/**/*.ts",
+    "tmp/build/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"
