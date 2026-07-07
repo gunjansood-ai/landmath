@@ -107,10 +107,18 @@ export default function Home() {
         return;
       }
 
-      // Step 2: Fetch property data from County GIS (PropertyInfo service)
-      const propertyRes = await fetch(
-        `/api/property?lat=${geo.lat}&lng=${geo.lng}`
-      );
+      // Step 2: Fetch property data from County GIS (PropertyInfo service).
+      // Address hints let the server fall back to an ADDR_FULL attribute match
+      // when KC GIS spatial queries are down (July 2026 502 regression).
+      const hintParams = new URLSearchParams({
+        lat: String(geo.lat),
+        lng: String(geo.lng),
+        streetNumber: geo.streetNumber || "",
+        street: geo.street || "",
+        city: geo.city || "",
+        zip: geo.zip || "",
+      });
+      const propertyRes = await fetch(`/api/property?${hintParams}`);
       const propertyData = await propertyRes.json();
 
       // Step 3: Build property object merging all sources

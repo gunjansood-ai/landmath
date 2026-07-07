@@ -349,7 +349,13 @@ async function queryPropertyInfoPoint(
   });
   let res: Response;
   try {
-    res = await fetch(`${KC_PROPERTY_INFO}/${layerId}/query?${pointParams}`);
+    // 8s cap: during KC's July 2026 spatial-query outage these requests HANG
+    // rather than fail fast — without a timeout the whole property route
+    // stalls for minutes and the client gives up. Fail fast → fall through
+    // to the ADDR_FULL attribute fallback.
+    res = await fetch(`${KC_PROPERTY_INFO}/${layerId}/query?${pointParams}`, {
+      signal: AbortSignal.timeout(8_000),
+    });
   } catch (err) {
     await sendAlert("⚠️ KC GIS layer " + layerId + " network error: " + (err as Error).message + ". Property data may be unavailable.");
     return [];
@@ -385,12 +391,98 @@ async function queryPropertyInfoPoint(
     ...extraParams,
   });
   try {
-    const res2 = await fetch(`${KC_PROPERTY_INFO}/${layerId}/query?${envParams}`);
+    const res2 = await fetch(`${KC_PROPERTY_INFO}/${layerId}/query?${envParams}`, {
+      signal: AbortSignal.timeout(8_000),
+    });
     if (!res2.ok) return [];
     const data2 = await res2.json();
     return (data2.features ?? []).map((f: PropertyInfoFeature) => f.attributes);
   } catch {
     return [];
+  }
+}
+
+// ─── Address-based parcel fallback ───────────────────────────────────────────
+//
+// July 2026: KC GIS started intermittently returning HTTP 502 for ALL spatial
+// (geometry) queries on the PropertyInfo service while plain attribute (WHERE)
+// queries kept working. When the point + envelope lookups fail, the app used
+// to silently conclude "not King County" and fall back to APIllow — which
+// reports wrong lot sizes (regression seen at 6812 Lake Washington Blvd SE,
+// Newcastle: real 16,705 sqft / R-4; APIllow path showed the wrong figure and
+// killed the 2-lot split analysis).
+//
+// This fallback resolves the subject parcel by ADDRESS instead: normalize the
+// Google-geocoded street ("Lake Washington Boulevard Southeast") into KC's
+// abbreviated ALL-CAPS form ("LAKE WASHINGTON BLVD SE") and match on
+// ADDR_FULL, then disambiguate by ZIP + city.
+
+const STREET_ABBREV: Record<string, string> = {
+  STREET: "ST", AVENUE: "AVE", BOULEVARD: "BLVD", DRIVE: "DR", ROAD: "RD",
+  LANE: "LN", PLACE: "PL", COURT: "CT", CIRCLE: "CIR", HIGHWAY: "HWY",
+  PARKWAY: "PKWY", TERRACE: "TER", TRAIL: "TRL", WAY: "WAY", LOOP: "LOOP",
+  NORTHEAST: "NE", NORTHWEST: "NW", SOUTHEAST: "SE", SOUTHWEST: "SW",
+  NORTH: "N", SOUTH: "S", EAST: "E", WEST: "W",
+};
+
+/** "Lake Washington Boulevard Southeast" → "LAKE WASHINGTON BLVD SE" */
+function normalizeStreetForKc(street: string): string {
+  return street
+    .toUpperCase()
+    .replace(/[.,]/g, "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => STREET_ABBREV[w] ?? w)
+    .join(" ");
+}
+
+async function queryParcelByAddress(
+  streetNumber: string,
+  street: string,
+  city: string | null,
+  zip: string | null,
+  outFields: string,
+): Promise<Record<string, unknown> | null> {
+  const normStreet = normalizeStreetForKc(street);
+  const firstWord = normStreet.split(" ")[0] ?? "";
+  if (!streetNumber || !firstWord) return null;
+  // Match loosely on "NUM FIRSTWORD%" (KC sometimes renders suffixes
+  // differently), then score candidates against the full normalized street.
+  const like = `${streetNumber} ${firstWord}%`.replace(/'/g, "''");
+  const params = new URLSearchParams({
+    where: `ADDR_FULL LIKE '${like}'`,
+    outFields,
+    returnGeometry: "false",
+    resultRecordCount: "10",
+    f: "json",
+  });
+  try {
+    const res = await fetch(`${KC_PROPERTY_INFO}/2/query?${params}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const candidates: Array<Record<string, unknown>> =
+      (data.features ?? []).map((f: PropertyInfoFeature) => f.attributes);
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0];
+
+    const wantWords = new Set(`${streetNumber} ${normStreet}`.split(" "));
+    const cityUp = (city ?? "").trim().toUpperCase();
+    let best: Record<string, unknown> | null = null;
+    let bestScore = -1;
+    for (const c of candidates) {
+      const addr = ((c.ADDR_FULL as string) ?? "").toUpperCase();
+      const addrWords = addr.split(/\s+/);
+      let score = addrWords.filter((w) => wantWords.has(w)).length;
+      if (zip && (c.ZIP5 as string)?.trim() === zip) score += 3;
+      const cName = ((c.CTYNAME as string) ?? (c.POSTALCTYNAME as string) ?? "").trim().toUpperCase();
+      if (cityUp && cName === cityUp) score += 2;
+      if (score > bestScore) { bestScore = score; best = c; }
+    }
+    return best;
+  } catch {
+    return null;
   }
 }
 
@@ -441,7 +533,7 @@ async function getAssessorDetails(pin: string): Promise<AssessorBits | null> {
   try {
     const res = await fetch(
       `https://blue.kingcounty.com/Assessor/eRealProperty/Dashboard.aspx?ParcelNbr=${pin}`,
-      { next: { revalidate: 86400 } }
+      { next: { revalidate: 86400 }, signal: AbortSignal.timeout(10_000) }
     );
     if (!res.ok) return null;
     const html = await res.text();
@@ -749,22 +841,47 @@ async function buildNeighborhood(
 export async function GET(req: NextRequest) {
   const lat = parseFloat(req.nextUrl.searchParams.get("lat") ?? "");
   const lng = parseFloat(req.nextUrl.searchParams.get("lng") ?? "");
+  // Optional address hints from the geocoder — used for the attribute-query
+  // fallback when KC GIS spatial queries are down (July 2026 502 regression).
+  const hintStreetNumber = req.nextUrl.searchParams.get("streetNumber") ?? "";
+  const hintStreet = req.nextUrl.searchParams.get("street") ?? "";
+  const hintCity = req.nextUrl.searchParams.get("city");
+  const hintZip = req.nextUrl.searchParams.get("zip");
 
   if (isNaN(lat) || isNaN(lng)) {
     return NextResponse.json({ error: "lat and lng required" }, { status: 400 });
   }
 
+  const PARCEL_FIELDS =
+    "PIN,ADDR_FULL,CTYNAME,POSTALCTYNAME,ZIP5,LOTSQFT,APPRLNDVAL,APPR_IMPR,KCA_ZONING,KCA_ACRES,PREUSE_CODE,PREUSE_DESC,PROPTYPE";
+
   // ── 1. Try King County GIS first ─────────────────────────────────────────
   // ZIP5 is critical for APIllow/Redfin address matching — without it, common
   // street names in dense cities like Bellevue collide and the lookup returns
   // null (root cause of the wrong-price bug at 16610 SE 24th).
+  //
+  // Resolution ladder:
+  //   1. Point-in-polygon query (fastest, authoritative when spatial works)
+  //   2. 30m envelope retry (inside queryPropertyInfoPoint)
+  //   3. ADDR_FULL attribute match — survives KC's spatial-query outages
   const parcelResults = (await queryPropertyInfoPoint(
     2,
     lat,
     lng,
-    "PIN,ADDR_FULL,CTYNAME,POSTALCTYNAME,ZIP5,LOTSQFT,APPRLNDVAL,APPR_IMPR,KCA_ZONING,KCA_ACRES,PREUSE_CODE,PREUSE_DESC,PROPTYPE"
+    PARCEL_FIELDS
   )) as Array<Record<string, unknown>>;
-  const kcParcel = parcelResults[0] ?? null;
+  let kcParcel: Record<string, unknown> | null = parcelResults[0] ?? null;
+  if (!kcParcel && hintStreetNumber && hintStreet) {
+    kcParcel = await queryParcelByAddress(
+      hintStreetNumber, hintStreet, hintCity, hintZip, PARCEL_FIELDS,
+    );
+    if (kcParcel) {
+      await sendAlert(
+        "⚠️ KC GIS spatial query failed; parcel resolved via ADDR_FULL fallback for " +
+        `${hintStreetNumber} ${hintStreet}. Nearby-comp queries may be degraded.`,
+      );
+    }
+  }
   const isKingCounty = kcParcel !== null;
 
   // ── 2a. King County path ──────────────────────────────────────────────────
