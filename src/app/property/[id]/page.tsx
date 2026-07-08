@@ -1601,12 +1601,12 @@ export default function PropertyAnalysis() {
         </Accordion>
         </div>
 
-        {/* ── Strategy Workbench header ──────────────────────────────────────── */}
-        <div className="flex items-center gap-2 mb-3 px-1">
-          <div className="h-px flex-1 bg-gray-200 dark:bg-slate-700" />
-          <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Strategy workbench — fine-tune one play</p>
-          <div className="h-px flex-1 bg-gray-200 dark:bg-slate-700" />
-        </div>
+        {/* ── Strategy Workbench (legacy engine) ───────────────────────────────
+            Collapsed by default: the scenario optimizer above is the single
+            source of truth. Kept for per-strategy manual overrides and the
+            townhome / multi-family wizards. */}
+        <div className="mb-5">
+        <Accordion label="🛠 Strategy workbench (classic view & manual overrides)">
 
         {/* ── Strategy Rail ──────────────────────────────────────────────────── */}
         <div className="flex gap-2 overflow-x-auto scrollbar-hide mb-4 pb-1 -mx-4 px-4">
@@ -1702,6 +1702,8 @@ export default function PropertyAnalysis() {
             <p className="text-xs text-gray-500 mt-1">The math doesn&apos;t work for any strategy at these numbers.</p>
           </div>
         )}
+        </Accordion>
+        </div>
 
         {/* ── Context sections — accordions ─────────────────────────────────── */}
         <div className="space-y-3">

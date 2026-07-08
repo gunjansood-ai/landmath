@@ -3,6 +3,7 @@
  * Run: npx tsx src/lib/optimizer/optimizer.test.ts
  */
 import { optimizeProperty, computeEnvelope } from "./index";
+import { getDefaultBuildSqft, getDefaultSellPricePerSqft } from "@/lib/calculations";
 import type { PropertyData, FinancingConfig } from "@/store/useStore";
 
 let pass = 0;
@@ -104,6 +105,30 @@ console.log("── Des Moines RS-8400 (adopted 4 units/lot), 10,000 sqft ──
   const fourPlex = report.scenarios.concat(report.longShots).find((s) => s.form === "plex" && s.unitsPerLot === 4);
   assert(!!fourPlex, "4-plex scenario generated");
   assert(fourPlex?.feasibility === "permitted", `adopted ordinance → permitted, not conditional (got ${fourPlex?.feasibility})`);
+}
+
+console.log("── PARITY: 10728 NE 26th St, Bellevue (SR-3, 12,466 sqft) ──");
+{
+  // Regression: the optimizer used to cap new-SFR at 3,400 sqft while the
+  // legacy Fresh Build card sized by FAR 0.5 → 6,233 sqft. The two engines
+  // must agree on build sqft and sale revenue for the same house.
+  const p = makeProperty({
+    address: "10728 NE 26th St", zip: "98004", zoningCode: "SR-3",
+    lotSizeSqft: 12466, listingPrice: 2019600, annualPropertyTax: 17800,
+  });
+  const legacySqft = getDefaultBuildSqft(p, "fresh_build");
+  const ppsf = getDefaultSellPricePerSqft(p, "premium", "fresh_build").value;
+  const report = optimizeProperty(p, "premium", 300, financing);
+  const all = report.scenarios.concat(report.longShots);
+  const sfr = all.find((s) => s.form === "sfr" && s.lots === 1 && s.exit === "sell");
+  assert(!!sfr, "teardown→SFR scenario exists");
+  assert(sfr!.totalBuildSqft === legacySqft,
+    `SFR build sqft matches legacy engine: ${sfr!.totalBuildSqft} === ${legacySqft}`);
+  assert(sfr!.financials.revenue === legacySqft * ppsf,
+    `SFR revenue = sqft × ppsf (${sfr!.financials.revenue.toLocaleString()} === ${(legacySqft * ppsf).toLocaleString()})`);
+  assert(sfr!.financials.profit > 500000,
+    `teardown on this lot is strongly profitable (got $${sfr!.financials.profit.toLocaleString()})`);
+  console.log(`  legacy ${legacySqft} sqft @ $${ppsf}/sqft → optimizer profit $${sfr!.financials.profit.toLocaleString()} (${sfr!.financials.roi}% ROI)`);
 }
 
 console.log("── Unknown city fallback (Boise, ID) ──");

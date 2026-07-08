@@ -19,6 +19,10 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   themeColor: "#16a34a",
+  // Extend content under the iPhone notch/home indicator; the layout already
+  // uses safe-area padding (pb-safe) where it matters. Required for the
+  // Capacitor iOS shell to look native instead of letterboxed.
+  viewportFit: "cover",
 };
 
 export default function RootLayout({

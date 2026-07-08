@@ -42,3 +42,9 @@ next-env.d.ts
 
 # sandbox build artifacts
 /tmp/
+
+# Capacitor / iOS build artifacts
+ios/App/build/
+ios/App/Pods/
+ios/DerivedData/
+ios/App/output/

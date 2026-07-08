@@ -41,6 +41,7 @@ import {
   combineFeasibility,
   hazardConfidencePenalty,
 } from "@/lib/hazards/kc-gis";
+import { computeNeighborhoodGuardrails } from "@/lib/buildability";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -474,10 +475,42 @@ export function evaluateScenario(
   let unitSqft = 0;
 
   switch (raw.form) {
-    case "sfr":
-    case "sfr_adu": {
-      mainSqftPerLot = Math.min(perLot * 0.5, 3400, Math.max(0, perLotCap - aduSqftPerLot));
+    case "sfr": {
+      // PARITY with the legacy engine (getMaxBuildableSqft "fresh_build"):
+      // size by FAR 0.5 on the lot — NO flat square-footage cap. The old
+      // arbitrary 3,400 sqft cap shrank a 12,466 sqft Bellevue lot to a
+      // 3,400 sqft house and flipped a $1.3M teardown win into a fake loss
+      // (regression found at 10728 NE 26th St).
+      let cap = Math.min(perLot * 0.5, perLotCap);
+      // Same neighborhood guardrail the legacy engine applies: don't model a
+      // house materially bigger than what the surrounding comps support.
+      if (property.neighborhood) {
+        const g = computeNeighborhoodGuardrails({
+          strategy: "fresh_build",
+          neighborhood: property.neighborhood,
+          maxBuildableByZoning: cap,
+        });
+        if (g.size.medianSqft) cap = g.size.safeMaxSqft;
+      }
+      mainSqftPerLot = cap;
       if (mainSqftPerLot < 1400) return null; // lot too small to pencil a new house
+      break;
+    }
+    case "sfr_adu": {
+      // PARITY with legacy "main_adu": main house at 70% of FAR budget,
+      // capped at 3,500 sqft (house-with-ADU product sells mid-market, not
+      // as a mega-home), ADUs at 1,000 sqft each on top.
+      let cap = Math.min(perLot * 0.5 * 0.7, 3500, Math.max(0, perLotCap - aduSqftPerLot));
+      if (property.neighborhood) {
+        const g = computeNeighborhoodGuardrails({
+          strategy: "main_adu",
+          neighborhood: property.neighborhood,
+          maxBuildableByZoning: cap,
+        });
+        if (g.size.medianSqft) cap = Math.min(cap, g.size.safeMaxSqft);
+      }
+      mainSqftPerLot = cap;
+      if (mainSqftPerLot < 1400) return null;
       break;
     }
     case "plex": {
@@ -702,6 +735,31 @@ export function evaluateScenario(
     sfr: 80, sfr_adu: 75, flip: 74, keep_dadu: 72,
     townhome: 64, plex: 62, multifamily: 55,
   } as Record<ScenarioForm, number>)[raw.form];
+
+  // ADU market-evidence rule: HB 1337 makes ADUs LEGAL everywhere in the UGA,
+  // but legality ≠ market. If not a single comp in the radius is an
+  // SFR-with-ADU, the resale premium is unproven there — penalize hard so
+  // ADU plays only surface as the headline when actual sales back them up.
+  if (raw.adusPerLot > 0) {
+    const nb = property.neighborhood;
+    const aduSaleComps = nb?.sales.filter((s) => s.typology === "sfr_with_adu").length ?? 0;
+    const aduTypologyCount = nb?.typology?.counts?.sfr_with_adu ?? 0;
+    const aduEvidence = Math.max(aduSaleComps, aduTypologyCount);
+    if (aduEvidence === 0) {
+      // Selling an unproven product is riskier than renting it.
+      confidence -= raw.exit === "sell" ? 16 : 8;
+      notes.push(
+        nb
+          ? "No SFR-with-ADU sales or structures found in the comp radius — the ADU resale premium is UNPROVEN in this pocket. Modeled anyway (HB 1337 makes it legal), but verify demand with an agent before betting on it."
+          : "No neighborhood data available to confirm ADU demand — treat the ADU premium as unproven.",
+      );
+    } else if (aduEvidence < 3) {
+      confidence -= raw.exit === "sell" ? 8 : 4;
+      notes.push(`Thin ADU precedent nearby (${aduEvidence} example${aduEvidence > 1 ? "s" : ""} in the comp radius) — some market risk on the ADU premium.`);
+    } else {
+      why.push(`ADU demand is proven here: ${aduEvidence} SFR-with-ADU examples in the comp radius.`);
+    }
+  }
 
   const feasibility = combineFeasibility(raw.zoningVerdict, hazardFeasibilityFloor(property.hazards ?? null));
   if (feasibility === "not_allowed") return null; // hazard floor kills it
