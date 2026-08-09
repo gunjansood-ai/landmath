@@ -460,6 +460,14 @@ function buildLabel(s: RawScenario): { label: string; shortLabel: string } {
   return { label, shortLabel };
 }
 
+/** User-pinned assumptions from the quick-tweak bar. Applied to every scenario. */
+export interface OptimizerOverrides {
+  /** Pin sale $/sqft — replaces the comps/ZIP-derived value. */
+  sellPricePerSqft?: number;
+  /** Pin main-house build sqft for SFR-type scenarios (still capped by the zoning envelope). */
+  sfrBuildSqft?: number;
+}
+
 export function evaluateScenario(
   property: PropertyData,
   env: DevelopmentEnvelope,
@@ -467,6 +475,7 @@ export function evaluateScenario(
   tier: QualityTier,
   costPerSqft: number,
   financing: FinancingConfig,
+  overrides?: OptimizerOverrides,
 ): ScenarioResult | null {
   const lot = property.lotSizeSqft || 0;
   const perLot = lot / raw.lots;
@@ -497,7 +506,11 @@ export function evaluateScenario(
         });
         if (g.size.medianSqft) cap = g.size.safeMaxSqft;
       }
-      mainSqftPerLot = cap;
+      // User-pinned build size wins over the neighborhood guardrail (it's an
+      // explicit choice) but never over the zoning envelope.
+      mainSqftPerLot = overrides?.sfrBuildSqft && overrides.sfrBuildSqft > 0
+        ? Math.min(overrides.sfrBuildSqft, Math.min(perLot * 0.5, perLotCap))
+        : cap;
       if (mainSqftPerLot < 1400) return null; // lot too small to pencil a new house
       break;
     }
@@ -514,7 +527,9 @@ export function evaluateScenario(
         });
         if (g.size.medianSqft) cap = Math.min(cap, g.size.safeMaxSqft);
       }
-      mainSqftPerLot = cap;
+      mainSqftPerLot = overrides?.sfrBuildSqft && overrides.sfrBuildSqft > 0
+        ? Math.min(overrides.sfrBuildSqft, perLot * 0.5, Math.max(0, perLotCap - aduSqftPerLot))
+        : cap;
       if (mainSqftPerLot < 1400) return null;
       break;
     }
@@ -566,7 +581,8 @@ export function evaluateScenario(
 
   // ── Pricing ───────────────────────────────────────────────────────────────
   const ppsfInfo = getDefaultSellPricePerSqft(property, tier, isFlip ? "flip_fix" : "fresh_build");
-  const ppsf = ppsfInfo.value;
+  const ppsfOverridden = overrides?.sellPricePerSqft != null && overrides.sellPricePerSqft > 0;
+  const ppsf = ppsfOverridden ? overrides!.sellPricePerSqft! : ppsfInfo.value;
 
   // ── Construction cost ─────────────────────────────────────────────────────
   const costMultKey = raw.form === "sfr" || raw.form === "sfr_adu" ? "sfr" : raw.form === "keep_dadu" ? "adu" : raw.form === "plex" ? "plex" : raw.form;
@@ -723,7 +739,7 @@ export function evaluateScenario(
       timelineMonths,
     };
     why.push(
-      `${totalUnits > 1 ? `${totalUnits} sellable units` : "Single sale"} at ~$${Math.round(revenue / Math.max(totalUnits, 1)).toLocaleString()} each (comps: ${ppsfSourceLabel(ppsfInfo.source)} $${ppsf}/sqft).`,
+      `${totalUnits > 1 ? `${totalUnits} sellable units` : "Single sale"} at ~$${Math.round(revenue / Math.max(totalUnits, 1)).toLocaleString()} each (${ppsfOverridden ? `your pinned price $${ppsf}/sqft` : `comps: ${ppsfSourceLabel(ppsfInfo.source)} $${ppsf}/sqft`}).`,
     );
   } else {
     // HOLD: stabilize, refi (BRRRR mechanics), keep the cash flow.
@@ -807,8 +823,8 @@ export function evaluateScenario(
   if (!env.rule) { confidence -= 25; notes.push(`Zoning code "${property.zoningCode}" not in the ${property.city} registry — feasibility uses generic parsing. Verify with the city.`); }
   else if (env.rule.verified === "unverified") { confidence -= 18; notes.push("Zoning data for this district is UNVERIFIED against current code text — confirm before offering."); }
   else if (env.rule.verified === "secondary") { confidence -= 5; }
-  if (ppsfInfo.source === "zip_premium") confidence -= 8;
-  if (ppsfInfo.source === "flat_fallback") { confidence -= 15; notes.push("Sale $/sqft uses a flat fallback (no local comps) — pull comps before trusting revenue."); }
+  if (!ppsfOverridden && ppsfInfo.source === "zip_premium") confidence -= 8;
+  if (!ppsfOverridden && ppsfInfo.source === "flat_fallback") { confidence -= 15; notes.push("Sale $/sqft uses a flat fallback (no local comps) — pull comps before trusting revenue."); }
   if (raw.lots >= 3) confidence -= 8;
   if (totalUnits >= 8) confidence -= 6;
   if (raw.exit === "hold") confidence -= 4;
@@ -894,11 +910,12 @@ export function optimizeProperty(
   tier: QualityTier,
   costPerSqft: number,
   financing: FinancingConfig,
+  overrides?: OptimizerOverrides,
 ): OptimizerReport {
   const env = computeEnvelope(property);
   const raws = enumerateScenarios(property, env);
   const evaluated = raws
-    .map((r) => evaluateScenario(property, env, r, tier, costPerSqft, financing))
+    .map((r) => evaluateScenario(property, env, r, tier, costPerSqft, financing, overrides))
     .filter((r): r is ScenarioResult => r !== null)
     .sort((a, b) => b.score - a.score);
 

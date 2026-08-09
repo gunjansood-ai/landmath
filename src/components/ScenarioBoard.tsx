@@ -9,16 +9,17 @@
  * confidence grade; low-confidence ideas are tucked into a collapsed section.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Trophy, ChevronDown, ChevronUp, Scale, TrendingUp, Clock,
   AlertTriangle, ExternalLink, Layers, Home, Building2, Hammer,
-  CircleDollarSign, KeyRound,
+  CircleDollarSign, KeyRound, SlidersHorizontal,
 } from "lucide-react";
 import type { PropertyData, QualityTier, FinancingConfig } from "@/store/useStore";
-import { formatCurrency } from "@/lib/calculations";
+import { formatCurrency, getDefaultSellPricePerSqft } from "@/lib/calculations";
 import {
   optimizeProperty,
+  type OptimizerOverrides,
   type ScenarioResult,
   type ScenarioExit,
   type ScenarioForm,
@@ -172,22 +173,84 @@ function ScenarioCard({ s, rank }: { s: ScenarioResult; rank: number }) {
   );
 }
 
+/** Compact numeric field for the quick-tweak bar. Commits on blur/Enter. */
+function TweakField({
+  label, unit, value, placeholder, onCommit, width = "w-full",
+}: {
+  label: string;
+  unit?: string;
+  value: number | undefined;
+  placeholder?: string;
+  onCommit: (v: number | undefined) => void;
+  width?: string;
+}) {
+  const [text, setText] = useState(value != null ? String(value) : "");
+  // Keep in sync when parent resets the value (e.g. tier change updates cost/sqft).
+  useEffect(() => { setText(value != null ? String(value) : ""); }, [value]);
+  const commit = () => {
+    const v = parseFloat(text);
+    onCommit(Number.isFinite(v) && v > 0 ? v : undefined);
+  };
+  return (
+    <label className="block">
+      <span className="text-[9px] uppercase tracking-wide text-gray-400 dark:text-gray-500 font-semibold block mb-0.5">
+        {label}
+      </span>
+      <div className="flex items-center gap-1">
+        <input
+          type="number"
+          inputMode="decimal"
+          value={text}
+          placeholder={placeholder}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+          className={`${width} text-xs font-semibold px-2 py-1.5 rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-gray-900 dark:text-white placeholder-gray-300 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+        />
+        {unit && <span className="text-[10px] text-gray-400 flex-shrink-0">{unit}</span>}
+      </div>
+    </label>
+  );
+}
+
 export default function ScenarioBoard({
   property, tier, costPerSqft, financing,
+  onCostPerSqftChange, onFinancingChange, onBestChange,
 }: {
   property: PropertyData;
   tier: QualityTier;
   costPerSqft: number;
   financing: FinancingConfig;
+  onCostPerSqftChange?: (v: number) => void;
+  onFinancingChange?: (f: FinancingConfig) => void;
+  onBestChange?: (best: ScenarioResult | null) => void;
 }) {
   const [exitFilter, setExitFilter] = useState<"all" | ScenarioExit>("all");
   const [showLongShots, setShowLongShots] = useState(false);
-  const [bestOpen, setBestOpen] = useState(false);
+  const [showAllScenarios, setShowAllScenarios] = useState(false);
+  const [bestOpen, setBestOpen] = useState(true); // winner arrives expanded
+  const [tweaksOpen, setTweaksOpen] = useState(false);
+  // User-pinned assumptions (quick-tweak bar)
+  const [sellPpsfOverride, setSellPpsfOverride] = useState<number | undefined>(undefined);
+  const [buildSqftOverride, setBuildSqftOverride] = useState<number | undefined>(undefined);
+
+  const defaultPpsf = useMemo(
+    () => getDefaultSellPricePerSqft(property, tier, "fresh_build").value,
+    [property, tier],
+  );
+
+  const overrides: OptimizerOverrides = useMemo(
+    () => ({ sellPricePerSqft: sellPpsfOverride, sfrBuildSqft: buildSqftOverride }),
+    [sellPpsfOverride, buildSqftOverride],
+  );
 
   const report = useMemo(
-    () => optimizeProperty(property, tier, costPerSqft, financing),
-    [property, tier, costPerSqft, financing],
+    () => optimizeProperty(property, tier, costPerSqft, financing, overrides),
+    [property, tier, costPerSqft, financing, overrides],
   );
+
+  // Surface the current best play to the page (AI narrator, share, etc.)
+  useEffect(() => { onBestChange?.(report.best); }, [report.best, onBestChange]);
 
   const filtered = useMemo(
     () => report.scenarios.filter((s) => exitFilter === "all" || s.exit === exitFilter),
@@ -196,6 +259,16 @@ export default function ScenarioBoard({
 
   const { best } = report;
   const env = report.envelopeSummary;
+
+  // The winner is expanded up top — the ranked list shows the OTHER top 3,
+  // with the rest behind a "show all" toggle.
+  const others = useMemo(
+    () => filtered.filter((s) => s.id !== best?.id),
+    [filtered, best],
+  );
+  const visibleOthers = showAllScenarios ? others : others.slice(0, 3);
+  const hiddenCount = others.length - 3;
+  const tweaksActive = sellPpsfOverride != null || buildSqftOverride != null;
 
   return (
     <section className="mb-6">
@@ -270,6 +343,80 @@ export default function ScenarioBoard({
         </p>
       </div>
 
+      {/* ── Quick tweaks — the numbers investors argue about most ────────── */}
+      <div className="mt-3">
+        <button
+          onClick={() => setTweaksOpen(!tweaksOpen)}
+          className={`w-full flex items-center justify-between px-4 py-2.5 rounded-2xl border text-xs font-semibold transition-colors ${
+            tweaksActive
+              ? "bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300"
+              : "bg-white dark:bg-slate-800 border-gray-200 dark:border-slate-700 text-gray-600 dark:text-gray-300"
+          }`}
+        >
+          <span className="flex items-center gap-2">
+            <SlidersHorizontal size={13} />
+            Quick tweaks — build sqft, $/sqft, financing
+            {tweaksActive && (
+              <span className="px-1.5 py-0.5 rounded-full bg-emerald-600 text-white text-[9px] font-bold">
+                pinned
+              </span>
+            )}
+          </span>
+          {tweaksOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+        {tweaksOpen && (
+          <div className="mt-2 p-3 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-2xl">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <TweakField
+                label="Build sqft"
+                unit="sqft"
+                value={buildSqftOverride}
+                placeholder={best ? String(best.totalBuildSqft) : "auto"}
+                onCommit={setBuildSqftOverride}
+              />
+              <TweakField
+                label="Sell price"
+                unit="$/sqft"
+                value={sellPpsfOverride}
+                placeholder={String(defaultPpsf)}
+                onCommit={setSellPpsfOverride}
+              />
+              <TweakField
+                label="Build cost"
+                unit="$/sqft"
+                value={costPerSqft}
+                onCommit={(v) => v != null && onCostPerSqftChange?.(v)}
+              />
+              <TweakField
+                label="Down payment"
+                unit="%"
+                value={financing.downPaymentPct}
+                onCommit={(v) => v != null && onFinancingChange?.({ ...financing, downPaymentPct: Math.min(100, v) })}
+              />
+              <TweakField
+                label="Constr. loan"
+                unit="%/yr"
+                value={financing.constructionRate ?? 10}
+                onCommit={(v) => v != null && onFinancingChange?.({ ...financing, constructionRate: v })}
+              />
+            </div>
+            <div className="flex items-center justify-between mt-2.5">
+              <p className="text-[10px] text-gray-400 leading-relaxed">
+                Build sqft & sell price apply to SFR scenarios (capped by zoning). Blank = auto from comps/envelope. Every scenario below re-prices live.
+              </p>
+              {tweaksActive && (
+                <button
+                  onClick={() => { setSellPpsfOverride(undefined); setBuildSqftOverride(undefined); }}
+                  className="text-[10px] font-semibold text-emerald-600 hover:underline flex-shrink-0 ml-3"
+                >
+                  Reset
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* ── Exit filter ──────────────────────────────────────────────────── */}
       {report.scenarios.length > 0 && (
         <div className="flex gap-1 bg-gray-100 dark:bg-slate-700 p-1 rounded-xl mt-4 mb-3">
@@ -290,15 +437,32 @@ export default function ScenarioBoard({
         </div>
       )}
 
-      {/* ── Ranked scenarios ─────────────────────────────────────────────── */}
+      {/* ── Runner-up scenarios: next 3 best, rest behind "show all" ─────── */}
+      {others.length > 0 && (
+        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 dark:text-gray-500 px-1 mb-2">
+          Next best plays
+        </p>
+      )}
       <div className="space-y-2">
-        {filtered.map((s, i) => (
-          <ScenarioCard key={s.id} s={s} rank={i + 1} />
+        {visibleOthers.map((s, i) => (
+          <ScenarioCard key={s.id} s={s} rank={i + 2} />
         ))}
         {filtered.length === 0 && report.scenarios.length > 0 && (
           <p className="text-xs text-gray-400 text-center py-3">No {exitFilter === "hold" ? "hold" : "sell"} scenarios at medium+ confidence.</p>
         )}
       </div>
+      {hiddenCount > 0 && (
+        <button
+          onClick={() => setShowAllScenarios(!showAllScenarios)}
+          className="mt-2 w-full flex items-center justify-center gap-1.5 px-4 py-2.5 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-2xl text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-slate-700/40"
+        >
+          {showAllScenarios ? (
+            <>Show top 3 only <ChevronUp size={14} /></>
+          ) : (
+            <>Show {hiddenCount} more scenario{hiddenCount > 1 ? "s" : ""} <ChevronDown size={14} /></>
+          )}
+        </button>
+      )}
 
       {/* ── Long shots (low confidence) ──────────────────────────────────── */}
       {report.longShots.length > 0 && (

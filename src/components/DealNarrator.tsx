@@ -2,7 +2,8 @@
 
 import { useState, useRef, useEffect } from "react";
 import { Sparkles, Send, Loader2, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
-import type { AnalysisResult } from "@/store/useStore";
+import type { AnalysisResult, PropertyData } from "@/store/useStore";
+import type { ScenarioResult } from "@/lib/optimizer";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -11,6 +12,9 @@ interface ChatMessage {
 
 interface DealNarratorProps {
   analysis: AnalysisResult;
+  /** The optimizer's winning scenario — when present, the narrative is written about THIS play (not the legacy strategy). */
+  scenario?: ScenarioResult | null;
+  property?: PropertyData;
   onNarrativeReady?: (narrative: string) => void;
 }
 
@@ -22,7 +26,7 @@ const SUGGESTED_QUESTIONS = [
   "What should I verify before making an offer?",
 ];
 
-export default function DealNarrator({ analysis, onNarrativeReady }: DealNarratorProps) {
+export default function DealNarrator({ analysis, scenario, property, onNarrativeReady }: DealNarratorProps) {
   const [narrative, setNarrative] = useState<string>("");
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [question, setQuestion] = useState("");
@@ -33,11 +37,12 @@ export default function DealNarrator({ analysis, onNarrativeReady }: DealNarrato
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Auto-generate narrative on mount
+  // Auto-generate narrative on mount, and regenerate when the optimizer's
+  // best play changes (so the write-up always matches the verdict on screen).
   useEffect(() => {
     generateNarrative();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [analysis.id]);
+  }, [analysis.id, scenario?.id]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -52,7 +57,7 @@ export default function DealNarrator({ analysis, onNarrativeReady }: DealNarrato
       const res = await fetch("/api/ai/narrate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ analysis }),
+        body: JSON.stringify({ analysis, scenario: scenario ?? undefined, property }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -83,6 +88,8 @@ export default function DealNarrator({ analysis, onNarrativeReady }: DealNarrato
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           analysis,
+          scenario: scenario ?? undefined,
+          property,
           question: trimmed,
           history: chat.map((m) => ({ role: m.role, content: m.content })),
         }),

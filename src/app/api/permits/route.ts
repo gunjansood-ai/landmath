@@ -58,6 +58,8 @@ export interface PermitRadarResult {
   source: "seattle_open_data" | "bellevue_arcgis" | "unavailable";
   cityName?: string;       // human-readable city label for UI
   portalUrl?: string;      // city permit portal link for "unavailable" state
+  /** Shown when the data source only partially covers the search radius. */
+  coverageNote?: string;
   error?: string;
 }
 
@@ -80,12 +82,22 @@ function inBounds(
   return lat >= b.latMin && lat <= b.latMax && lng >= b.lngMin && lng <= b.lngMax;
 }
 
-type CityTarget = "seattle" | "bellevue" | "other_kc" | "unknown";
+type CityTarget = "seattle" | "bellevue" | "bellevue_adjacent" | "other_kc" | "unknown";
+
+/**
+ * Point cities bordering Bellevue (Medina, Clyde Hill, Yarrow Point, Hunts
+ * Point, Beaux Arts) issue their own permits via MyBuildingPermit — no public
+ * API. But their 1-mile radius overlaps Bellevue heavily, so we query the
+ * Bellevue dataset for PARTIAL coverage and say so, instead of silently
+ * mislabeling them as Bellevue (the old bounding-box bug) or showing nothing.
+ */
+const BELLEVUE_ADJACENT = ["medina", "clyde hill", "yarrow point", "hunts point", "beaux arts"];
 
 function detectCity(cityParam: string, lat: number, lng: number): CityTarget {
   const c = cityParam.toLowerCase().trim();
   if (c.includes("seattle"))  return "seattle";
   if (c.includes("bellevue")) return "bellevue";
+  if (BELLEVUE_ADJACENT.some((k) => c.includes(k))) return "bellevue_adjacent";
 
   // Known KC cities that have no public permit API
   const otherKC = [
@@ -93,7 +105,8 @@ function detectCity(cityParam: string, lat: number, lng: number): CityTarget {
     "auburn","shoreline","bothell","kenmore","mercer island","issaquah",
     "newcastle","lake forest park","woodinville","covington","maple valley",
     "black diamond","enumclaw","north bend","snoqualmie","duvall","carnation",
-    "unincorporated","king county",
+    "des moines","normandy park","tukwila","seatac","algona","pacific",
+    "milton","skykomish","unincorporated","king county",
   ];
   if (otherKC.some((k) => c.includes(k))) return "other_kc";
 
@@ -120,7 +133,8 @@ function buildSummary(
   lookbackDays: number,
   source: PermitRadarResult["source"],
   cityName?: string,
-  portalUrl?: string
+  portalUrl?: string,
+  coverageNote?: string
 ): PermitRadarResult {
   const newConstruction = permits.filter((p) => p.category === "new_construction").length;
   const adu             = permits.filter((p) => p.category === "adu").length;
@@ -142,6 +156,7 @@ function buildSummary(
     source,
     cityName,
     portalUrl,
+    coverageNote,
   };
 }
 
@@ -325,7 +340,14 @@ async function fetchBellevuePermits(
 
 // ── Portal links for cities without API ──────────────────────────────────────
 
+const MBP_SEARCH_URL = "https://permitsearch.mybuildingpermit.com/";
+
 const KC_CITY_PORTALS: Record<string, { label: string; url: string }> = {
+  medina:         { label: "Medina permits (MyBuildingPermit)",      url: MBP_SEARCH_URL },
+  "clyde hill":   { label: "Clyde Hill permits (MyBuildingPermit)",  url: MBP_SEARCH_URL },
+  "yarrow point": { label: "Yarrow Point permits (MyBuildingPermit)",url: MBP_SEARCH_URL },
+  "hunts point":  { label: "Hunts Point permits (MyBuildingPermit)", url: MBP_SEARCH_URL },
+  "beaux arts":   { label: "Beaux Arts permits (MyBuildingPermit)",  url: MBP_SEARCH_URL },
   kirkland:       { label: "Kirkland Permit Center",    url: "https://www.kirklandwa.gov/government/departments/planning-and-building/permits-and-inspections" },
   redmond:        { label: "Redmond Permits",           url: "https://www.redmond.gov/428/Permits-and-Zoning" },
   renton:         { label: "Renton Permits & Licensing",url: "https://rentonwa.gov/cms/one.aspx?portalId=7922741&pageId=9867923" },
@@ -383,6 +405,24 @@ export async function GET(req: NextRequest) {
       console.error("Bellevue permits error:", err);
       return NextResponse.json(emptyUnavailable(radiusMiles, lookbackDays, "Bellevue",
         "https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/Bellevue_Permits/FeatureServer"));
+    }
+  }
+
+  // ── Bellevue-adjacent point city (Medina, Clyde Hill, …) ──────────────────
+  // These issue their own permits via MyBuildingPermit (no public API), but
+  // their radius overlaps Bellevue heavily — show Bellevue-issued permits as
+  // PARTIAL coverage with an honest note + a link to the city's own search.
+  if (target === "bellevue_adjacent") {
+    const label = cityParam.replace(/\b\w/g, (c) => c.toUpperCase()) || "This city";
+    const note = `${label} issues its own permits through MyBuildingPermit (no public data feed) — this radar shows Bellevue-issued permits inside the radius only. For ${label} permits themselves, use the search link below.`;
+    try {
+      const permits = await fetchBellevuePermits(lat, lng, radiusMiles, lookbackDays);
+      return NextResponse.json(
+        buildSummary(permits, radiusMiles, lookbackDays, "bellevue_arcgis", label, MBP_SEARCH_URL, note)
+      );
+    } catch (err) {
+      console.error("Bellevue-adjacent permits error:", err);
+      return NextResponse.json(emptyUnavailable(radiusMiles, lookbackDays, label, MBP_SEARCH_URL));
     }
   }
 

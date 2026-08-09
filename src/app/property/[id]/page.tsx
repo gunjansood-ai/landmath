@@ -33,6 +33,7 @@ import LenderReport from "@/components/LenderReport";
 import DownloadReportButton from "@/components/DownloadReportButton";
 import FeasibilityReasoningModal from "@/components/FeasibilityReasoningModal";
 import ScenarioBoard from "@/components/ScenarioBoard";
+import type { ScenarioResult } from "@/lib/optimizer";
 import {
   useStore,
   Strategy,
@@ -1147,6 +1148,9 @@ export default function PropertyAnalysis() {
   const [listPriceOverride, setListPriceOverride] = useState<number | undefined>(undefined);
   const [strategyOverrides, setStrategyOverrides] = useState<Partial<Record<Strategy, StrategyOverrides>>>({});
   const [aiNarrative, setAiNarrative] = useState<string>("");
+  // The scenario optimizer's current winner — feeds the AI narrator so the
+  // write-up matches the "Best play" verdict on screen.
+  const [optimizerBest, setOptimizerBest] = useState<ScenarioResult | null>(null);
   const [showComps, setShowComps] = useState(false);
 
   // New strategy inputs — seed MF rents from ZIP table immediately so the form
@@ -1396,6 +1400,9 @@ export default function PropertyAnalysis() {
             tier={qualityTier}
             costPerSqft={costPerSqft}
             financing={financing}
+            onCostPerSqftChange={setCostPerSqft}
+            onFinancingChange={setFinancing}
+            onBestChange={setOptimizerBest}
           />
         )}
 
@@ -1856,6 +1863,8 @@ export default function PropertyAnalysis() {
             <Accordion label="🤖 AI Deal Narrator">
               <DealNarrator
                 analysis={coreAnalyses.find((a) => a.strategy === recommended) ?? coreAnalyses[0]}
+                scenario={optimizerBest}
+                property={effectiveProperty ?? property}
                 onNarrativeReady={(text) => setAiNarrative(text)}
               />
             </Accordion>

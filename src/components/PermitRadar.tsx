@@ -312,7 +312,7 @@ export default function PermitRadar({ lat, lng, address, city }: PermitRadarProp
                     Permit data unavailable for {data.cityName ?? "this area"}
                   </p>
                   <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">
-                    Permit Radar supports Seattle and Bellevue. More KC cities coming soon.
+                    Live permit feeds cover Seattle, Bellevue, and Bellevue-adjacent point cities (partial). Other KC cities link to their own portals below.
                   </p>
                   {data.portalUrl && (
                     <a
@@ -330,6 +330,27 @@ export default function PermitRadar({ lat, lng, address, city }: PermitRadarProp
             </div>
           ) : summary ? (
             <>
+              {/* Partial-coverage note (e.g. Medina: Bellevue-issued permits only) */}
+              {data?.coverageNote && (
+                <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 rounded-lg p-3 flex items-start gap-2">
+                  <AlertTriangle size={13} className="text-blue-600 mt-0.5 flex-shrink-0" />
+                  <div className="flex-1">
+                    <p className="text-xs text-blue-800 dark:text-blue-300 leading-relaxed">{data.coverageNote}</p>
+                    {data.portalUrl && (
+                      <a
+                        href={data.portalUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 mt-1.5 text-xs font-medium text-blue-700 dark:text-blue-400 underline underline-offset-2"
+                      >
+                        <ExternalLink size={10} />
+                        Search {data.cityName ?? "city"} permits on MyBuildingPermit →
+                      </a>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Competitive supply score */}
               <SupplyScoreMeter
                 score={summary.competitiveSupplyScore}

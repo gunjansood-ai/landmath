@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import type { AnalysisResult } from "@/store/useStore";
+import type { AnalysisResult, PropertyData } from "@/store/useStore";
+import type { ScenarioResult } from "@/lib/optimizer";
 import { formatCurrency, formatPercent, STRATEGIES, QUALITY_TIERS } from "@/lib/calculations";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -20,6 +21,69 @@ When answering a follow-up question:
 - Stay tightly focused on the question
 - Reference the deal data provided
 - Give a direct answer, not "it depends"`;
+}
+
+/**
+ * Deal context from the OPTIMIZER's winning scenario — this is what the user
+ * sees as "Best play for this land", so the narrative must describe THIS,
+ * not the legacy 6-strategy card.
+ */
+function buildScenarioContext(scenario: ScenarioResult, property: PropertyData): string {
+  const f = scenario.financials;
+  const comps = property.neighborhood?.sales?.slice(0, 5) ?? [];
+  return `
+DEAL SUMMARY
+============
+Property: ${property.address}, ${property.city}, ${property.state} ${property.zip}
+Lot Size: ${property.lotSizeSqft.toLocaleString()} sqft
+Zoning: ${property.zoningCode || "Unknown"}
+Current Structure: ${property.beds}bd/${property.baths}ba, ${property.currentSqft.toLocaleString()} sqft, built ${property.yearBuilt || "unknown"}
+Listing Price: ${formatCurrency(property.listingPrice)}
+Annual Property Tax: ${formatCurrency(property.annualPropertyTax)}
+Flood Zone: ${property.floodZone ? "Yes" : "No"}
+
+RECOMMENDED PLAY (scenario optimizer's #1 of all legal development combos)
+==========================================================================
+${scenario.label}
+Form: ${scenario.form} · Exit: ${scenario.exit} · ${scenario.lots} lot(s) · ${scenario.totalUnits} unit(s) · ${scenario.totalBuildSqft.toLocaleString()} sqft new construction
+Feasibility: ${scenario.feasibility}
+Confidence: ${scenario.confidence}/100 (${scenario.confidenceLabel})
+
+FINANCIAL MODEL
+===============
+${scenario.exit === "hold" ? "Stabilized Value" : "Sale Revenue"}: ${formatCurrency(f.revenue)}
+Total Project Cost: ${formatCurrency(f.totalProjectCost)}
+  - Acquisition (incl. closing): ${formatCurrency(f.acquisitionCost)}
+  - Construction (all-in): ${formatCurrency(f.constructionCost)}
+  - Holding + Loan Costs: ${formatCurrency(f.holdingCost)}
+  ${scenario.exit === "sell" ? `- Selling Costs: ${formatCurrency(f.sellingCosts)}` : ""}
+${scenario.exit === "hold" ? "Equity Created" : "Projected Profit"}: ${formatCurrency(f.profit)}
+ROI (on avg cash deployed): ${f.roi}%
+Annualized ROI: ${f.annualizedRoi}%
+Peak Cash Required: ${formatCurrency(f.totalCashInvested)}
+Avg Cash Deployed: ${formatCurrency(f.avgCashDeployed ?? f.totalCashInvested)}
+Timeline: ${f.timelineMonths} months
+${scenario.exit === "hold" ? `NOI: ${formatCurrency(f.noi ?? 0)} @ ${f.capRate}% cap · Refi Loan: ${formatCurrency(f.refiLoan ?? 0)} · Cash Left In: ${formatCurrency(f.cashLeftInDeal ?? 0)} · Annual Cash Flow: ${formatCurrency(f.annualCashFlow ?? 0)}` : ""}
+
+WHY THIS WINS (optimizer reasoning)
+===================================
+${scenario.why.map((w) => `  - ${w}`).join("\n")}
+
+LEGAL BASIS
+===========
+${scenario.citations.map((c) => `  - ${c.label}`).join("\n") || "  (none)"}
+
+CAVEATS / VERIFICATION FLAGS
+============================
+${scenario.notes.map((n) => `  - ${n}`).join("\n") || "  (none)"}
+
+NEIGHBORHOOD CONTEXT
+====================
+${property.neighborhood ? `Nearby comps (${property.neighborhood.sales.length} total):
+${comps.map((c) => `  - ${c.address.split(",")[0]}: ${formatCurrency(c.salePrice)}${c.sqftLiving ? ` (${c.sqftLiving.toLocaleString()} sqft, $${c.pricePerSqft}/sqft)` : ""} sold ${c.saleDate || "recently"}`).join("\n")}
+Neighborhood median home sqft: ${property.neighborhood.medianHomeSqft ? property.neighborhood.medianHomeSqft.toLocaleString() : "unknown"}
+Recent multi-unit permits nearby: ${property.neighborhood.recentMultiUnitCount}` : "No neighborhood data available."}
+`.trim();
 }
 
 function buildDealContext(analysis: AnalysisResult): string {
@@ -93,19 +157,29 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let body: { analysis: AnalysisResult; question?: string; history?: Array<{ role: "user" | "assistant"; content: string }> };
+  let body: {
+    analysis?: AnalysisResult;
+    scenario?: ScenarioResult;
+    property?: PropertyData;
+    question?: string;
+    history?: Array<{ role: "user" | "assistant"; content: string }>;
+  };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { analysis, question, history = [] } = body;
-  if (!analysis) {
-    return NextResponse.json({ error: "analysis required" }, { status: 400 });
+  const { analysis, scenario, property, question, history = [] } = body;
+  if (!analysis && !(scenario && property)) {
+    return NextResponse.json({ error: "analysis or scenario+property required" }, { status: 400 });
   }
 
-  const dealContext = buildDealContext(analysis);
+  // Prefer the optimizer's best play — that's the verdict the user is looking at.
+  const dealContext =
+    scenario && property
+      ? buildScenarioContext(scenario, property)
+      : buildDealContext(analysis!);
 
   // First call: generate the narrative (no question = initial analysis)
   // Follow-up calls: answer a specific question using the deal context
