@@ -89,6 +89,7 @@ function ScenarioDetail({ s }: { s: ScenarioResult }) {
         <Row label="Holding + loan costs" value={formatCurrency(f.holdingCost)} />
         {s.exit === "sell" && <Row label="Selling costs" value={formatCurrency(f.sellingCosts)} />}
         <Row label="Cash required (peak)" value={formatCurrency(f.totalCashInvested)} />
+        <Row label="Avg cash deployed (ROI basis)" value={formatCurrency(f.avgCashDeployed ?? f.totalCashInvested)} />
         <Row
           label={s.exit === "hold" ? "Equity created" : "Net profit"}
           value={formatCurrency(f.profit)}

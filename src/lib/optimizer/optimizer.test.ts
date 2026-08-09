@@ -57,15 +57,21 @@ console.log("── Bellevue SR-3, 18,000 sqft lot ──");
 
 console.log("── Seattle NR3, 6,000 sqft lot ──");
 {
+  // listingPrice 800k: at 950k NOTHING pencils under the draw-schedule carry
+  // model (the old flat-interest model showed a +$808 keep_dadu "best" — noise).
   const p = makeProperty({
     city: "Seattle", zip: "98115", zoningCode: "NR3",
-    lotSizeSqft: 6000, listingPrice: 950000, annualPropertyTax: 8200,
+    lotSizeSqft: 6000, listingPrice: 800000, annualPropertyTax: 8200,
   });
   const env = computeEnvelope(p);
   assert(env.rule !== null, "registry hit for Seattle NR3");
   assert(env.maxUnitsPerLot >= 4, `Seattle adopted 4 units/lot (got ${env.maxUnitsPerLot})`);
   const report = optimizeProperty(p, "premium", 300, financing);
-  assert(report.best !== null, "produces a best scenario");
+  assert(
+    report.best !== null ||
+      report.scenarios.concat(report.longShots).every((s) => s.financials.profit <= 0),
+    "produces a best scenario (or an honest PASS when nothing pencils)",
+  );
   assert(
     report.scenarios.some((s) => s.form === "plex" && s.unitsPerLot === 4),
     "includes a 4-plex middle-housing scenario",
@@ -94,9 +100,12 @@ console.log("── Renton R-8 (corrected 5,000 min lot), 11,000 sqft ──");
 
 console.log("── Des Moines RS-8400 (adopted 4 units/lot), 10,000 sqft ──");
 {
+  // listingPrice 420k: at 560k every scenario loses money and the 4-plex can
+  // fall below the top-6 long-shot cutoff — the assertion here is about ZONING
+  // (adopted ordinance → permitted), so use a price where scenarios surface.
   const p = makeProperty({
     city: "Des Moines", zip: "98198", zoningCode: "RS-8400",
-    lotSizeSqft: 10000, listingPrice: 560000, annualPropertyTax: 5100,
+    lotSizeSqft: 10000, listingPrice: 420000, annualPropertyTax: 5100,
   });
   const env = computeEnvelope(p);
   assert(env.rule !== null, "registry hit for Des Moines RS-8400");

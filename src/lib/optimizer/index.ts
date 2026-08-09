@@ -35,7 +35,9 @@ import {
   getDefaultSellPricePerSqft,
   getMarketRentDefaults,
   estimateDistrictMinLotSqft,
+  getSellMonths,
 } from "@/lib/calculations";
+import { computeDrawSchedule } from "@/lib/draw-schedule";
 import {
   hazardFeasibilityFloor,
   combineFeasibility,
@@ -81,9 +83,12 @@ export interface ScenarioFinancials {
   holdingCost: number;
   sellingCosts: number;
   totalProjectCost: number;
+  /** Peak cash tied up — sizes the bankroll ("Cash needed" in the UI). */
   totalCashInvested: number;
+  /** Weighted-average cash deployed over the project life (draw schedule). ROI denominator. */
+  avgCashDeployed: number;
   profit: number;             // sell: net profit. hold: development equity created.
-  roi: number;                // % on cash invested
+  roi: number;                // % on avg cash deployed (matches calculations.ts convention)
   annualizedRoi: number;
   timelineMonths: number;
   // hold-exit extras
@@ -590,51 +595,10 @@ export function evaluateScenario(
     hardCost + demo + platCost + unitLotSubCost + permitFees + architect + contingency + landscaping + commonArea,
   );
 
-  // ── Timeline ──────────────────────────────────────────────────────────────
-  const buildRate = BUILD_RATE_SQFT_PER_MONTH[costMultKey] ?? 400;
-  const tierTime = QUALITY_TIERS[tier].timeMultiplier;
-  const permitMonths =
-    isFlip ? 2 :
-    keepHouse ? 4 :
-    raw.form === "multifamily" ? 10 :
-    raw.form === "townhome" || raw.form === "plex" ? 8 :
-    raw.lots > 1 ? 10 : 6;
-  const buildMonths = Math.max(2, Math.ceil((totalBuildSqft / buildRate) * tierTime * (raw.lots > 1 ? 1.15 : 1)));
-  const sellMonths = raw.exit === "hold" ? 2 : totalUnits > 4 ? 4 : totalUnits > 1 ? 3 : 2;
-  const timelineMonths = permitMonths + buildMonths + sellMonths;
-
-  // ── Acquisition + holding + construction financing ────────────────────────
   const purchase = property.listingPrice || 0;
   if (purchase <= 0) return null;
-  const closing = purchase * 0.025;
-  const isAllCash = financing.type === "cash";
-  const downPct = isAllCash ? 100 : financing.downPaymentPct;
-  const downPayment = purchase * (downPct / 100);
-  const acqLoan = purchase - downPayment;
-  const acqPoints = acqLoan > 0 && financing.points > 0 ? acqLoan * (financing.points / 100) : 0;
-  const isIO = financing.type === "interest_only" || financing.type === "hard_money";
-  const acqMonthly = isAllCash ? 0 : calculateMonthlyPayment(acqLoan, financing.interestRate, financing.loanTermYears, isIO);
 
-  const ltc = Math.min(0.9, Math.max(0, financing.constructionLtcPct ?? 0.8));
-  const cRate = financing.constructionRate ?? 10;
-  const cPoints = financing.constructionPoints ?? 2;
-  const constructionLoan = constructionCost * ltc;
-  const constructionInterest = constructionLoan * (cRate / 100) * ((buildMonths / 2 + sellMonths) / 12);
-  const constructionOrigination = constructionLoan * (cPoints / 100);
-
-  const monthlyFixed =
-    (property.annualPropertyTax || purchase * 0.0092) / 12 +
-    (purchase * 0.004) / 12 +
-    (property.hoaMonthly || 0) +
-    300;
-  const holdingCost = Math.round((acqMonthly + monthlyFixed) * timelineMonths + constructionInterest + constructionOrigination);
-
-  const acquisitionCost = Math.round(purchase + closing + acqPoints);
-  const totalCashInvested = Math.round(
-    downPayment + closing + acqPoints + constructionCost * (1 - ltc) + holdingCost,
-  );
-
-  // ── Revenue ───────────────────────────────────────────────────────────────
+  // ── Revenue (computed before timeline: sell-phase length depends on price) ─
   // Sale-comp revenue is computed for BOTH exits (hold uses it as an
   // appraisal sanity bound on the income value).
   let revenue = 0;
@@ -665,6 +629,82 @@ export function evaluateScenario(
   }
   revenue = Math.round(revenue);
 
+  // ── Timeline ──────────────────────────────────────────────────────────────
+  const buildRate = BUILD_RATE_SQFT_PER_MONTH[costMultKey] ?? 400;
+  const tierTime = QUALITY_TIERS[tier].timeMultiplier;
+  const permitMonths =
+    isFlip ? 2 :
+    keepHouse ? 4 :
+    raw.form === "multifamily" ? 10 :
+    raw.form === "townhome" || raw.form === "plex" ? 8 :
+    raw.lots > 1 ? 10 : 6;
+  const buildMonths = Math.max(2, Math.ceil((totalBuildSqft / buildRate) * tierTime * (raw.lots > 1 ? 1.15 : 1)));
+  // Sell-phase length: same days-on-market curve as calculations.ts
+  // (getSellMonths — price-aware, so a $2M+ unit carries 4 months), applied to
+  // PER-UNIT price, floored by the multi-unit absorption rule (more units take
+  // longer to clear even when each is cheap).
+  const perUnitPrice = revenue / Math.max(1, totalUnits);
+  const sellMonths =
+    raw.exit === "hold"
+      ? 2
+      : Math.max(
+          Math.ceil(getSellMonths(tier, perUnitPrice)),
+          totalUnits > 4 ? 4 : totalUnits > 1 ? 3 : 2,
+        );
+  const timelineMonths = permitMonths + buildMonths + sellMonths;
+
+  // ── Acquisition + holding + construction financing ────────────────────────
+  const closing = purchase * 0.025;
+  const isAllCash = financing.type === "cash";
+  const downPct = isAllCash ? 100 : financing.downPaymentPct;
+  const downPayment = purchase * (downPct / 100);
+  const acqLoan = purchase - downPayment;
+  const acqPoints = acqLoan > 0 && financing.points > 0 ? acqLoan * (financing.points / 100) : 0;
+  const isIO = financing.type === "interest_only" || financing.type === "hard_money";
+  const acqMonthly = isAllCash ? 0 : calculateMonthlyPayment(acqLoan, financing.interestRate, financing.loanTermYears, isIO);
+
+  const ltc = Math.min(0.9, Math.max(0, financing.constructionLtcPct ?? 0.8));
+  const cRate = financing.constructionRate ?? 10;
+  const cPoints = financing.constructionPoints ?? 2;
+  const constructionLoan = constructionCost * ltc;
+
+  // Same S-curve draw schedule as calculations.ts: interest accrues on the
+  // DRAWN balance only (AIA G702 curve), not on the full loan from day one.
+  const draw = computeDrawSchedule({
+    constructionCost,
+    permitMonths,
+    buildMonths,
+    sellMonths,
+    constructionLtcPct: ltc,
+    constructionRate: cRate,
+    constructionPoints: cPoints,
+    upfrontEquity: downPayment + closing + acqPoints,
+    acquisitionLoanBalance: acqLoan,
+    acquisitionMonthlyPayment: acqMonthly,
+  });
+
+  const monthlyFixed =
+    (property.annualPropertyTax || purchase * 0.0092) / 12 +
+    (purchase * 0.004) / 12 +
+    (property.hoaMonthly || 0) +
+    300;
+  const holdingCost = Math.round(
+    (acqMonthly + monthlyFixed) * timelineMonths +
+    draw.totalConstructionInterest +
+    draw.originationFees,
+  );
+
+  const acquisitionCost = Math.round(purchase + closing + acqPoints);
+  // Peak cash = the most ever tied up (sizes the bankroll; shown as "Cash needed").
+  const totalCashInvested = Math.round(
+    downPayment + closing + acqPoints + constructionCost * (1 - ltc) + holdingCost,
+  );
+  // ROI denominator = weighted-average cash deployed over the project life
+  // (same convention as calculations.ts — capital ramps in via the draw
+  // schedule, so average tied-up cash is well below peak).
+  const avgCashDeployed =
+    draw.weightedAvgCashDeployed > 0 ? draw.weightedAvgCashDeployed : totalCashInvested;
+
   const notes = [...raw.notes];
   const why: string[] = [raw.legalWhy];
 
@@ -674,10 +714,10 @@ export function evaluateScenario(
     const sellingCosts = Math.round(revenue * SELL_COST_PCT + 5000);
     const totalProjectCost = acquisitionCost + constructionCost + holdingCost + sellingCosts;
     const profit = Math.round(revenue - totalProjectCost);
-    const roi = totalCashInvested > 0 ? (profit / totalCashInvested) * 100 : 0;
+    const roi = avgCashDeployed > 0 ? (profit / avgCashDeployed) * 100 : 0;
     fin = {
       revenue, acquisitionCost, constructionCost, holdingCost, sellingCosts,
-      totalProjectCost, totalCashInvested,
+      totalProjectCost, totalCashInvested, avgCashDeployed,
       profit, roi: round1(roi),
       annualizedRoi: round1(timelineMonths > 0 ? roi * (12 / timelineMonths) : 0),
       timelineMonths,
@@ -709,10 +749,10 @@ export function evaluateScenario(
       ? Math.min(999, round1((annualCashFlow / cashLeftInDeal) * 100))
       : annualCashFlow > 0 ? 999 : 0;
     const equityCreated = Math.round(stabilizedValue - totalProjectCost);
-    const roi = totalCashInvested > 0 ? (equityCreated / totalCashInvested) * 100 : 0;
+    const roi = avgCashDeployed > 0 ? (equityCreated / avgCashDeployed) * 100 : 0;
     fin = {
       revenue: stabilizedValue, acquisitionCost, constructionCost, holdingCost,
-      sellingCosts: 0, totalProjectCost, totalCashInvested,
+      sellingCosts: 0, totalProjectCost, totalCashInvested, avgCashDeployed,
       profit: equityCreated, roi: round1(roi),
       annualizedRoi: round1(timelineMonths > 0 ? roi * (12 / timelineMonths) : 0),
       timelineMonths,

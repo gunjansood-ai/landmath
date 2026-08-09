@@ -849,7 +849,8 @@ function getBuildMonths(strategy: Strategy, tier: QualityTier, sqft: number): nu
 }
 
 // Estimate days on market → months
-function getSellMonths(tier: QualityTier, price: number): number {
+// Exported so the scenario optimizer prices sell-phase carry identically.
+export function getSellMonths(tier: QualityTier, price: number): number {
   if (price > 2000000) return 4;
   if (price > 1000000) return 3;
   if (tier === "standard") return 2;
