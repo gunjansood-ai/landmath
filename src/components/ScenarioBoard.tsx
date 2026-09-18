@@ -234,10 +234,11 @@ export default function ScenarioBoard({
   const [showLongShots, setShowLongShots] = useState(false);
   const [showAllScenarios, setShowAllScenarios] = useState(false);
   const [bestOpen, setBestOpen] = useState(true); // winner arrives expanded
-  const [tweaksOpen, setTweaksOpen] = useState(false);
+  const [tweaksOpen, setTweaksOpen] = useState(true); // prominent, open by default
   // User-pinned assumptions (quick-tweak bar)
   const [sellPpsfOverride, setSellPpsfOverride] = useState<number | undefined>(undefined);
   const [buildSqftOverride, setBuildSqftOverride] = useState<number | undefined>(undefined);
+  const [timelineOverride, setTimelineOverride] = useState<number | undefined>(undefined);
 
   const defaultPpsf = useMemo(
     () => getDefaultSellPricePerSqft(property, tier, "fresh_build").value,
@@ -245,8 +246,12 @@ export default function ScenarioBoard({
   );
 
   const overrides: OptimizerOverrides = useMemo(
-    () => ({ sellPricePerSqft: sellPpsfOverride, sfrBuildSqft: buildSqftOverride }),
-    [sellPpsfOverride, buildSqftOverride],
+    () => ({
+      sellPricePerSqft: sellPpsfOverride,
+      sfrBuildSqft: buildSqftOverride,
+      timelineMonths: timelineOverride,
+    }),
+    [sellPpsfOverride, buildSqftOverride, timelineOverride],
   );
 
   const report = useMemo(
@@ -274,7 +279,7 @@ export default function ScenarioBoard({
   );
   const visibleOthers = showAllScenarios ? others : others.slice(0, 3);
   const hiddenCount = others.length - 3;
-  const tweaksActive = sellPpsfOverride != null || buildSqftOverride != null;
+  const tweaksActive = sellPpsfOverride != null || buildSqftOverride != null || timelineOverride != null;
 
   return (
     <section className="mb-6">
@@ -337,42 +342,31 @@ export default function ScenarioBoard({
         </div>
       )}
 
-      {/* ── Zoning envelope summary ──────────────────────────────────────── */}
-      <div className="mt-3 px-1 flex items-start gap-2">
-        <Scale size={12} className="text-gray-400 flex-shrink-0 mt-0.5" />
-        <p className="text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
-          <strong className="text-gray-700 dark:text-gray-300">{env.zoningCode}</strong>
-          {env.codeSection ? <> · {env.codeSection}</> : <> · not in registry (generic parsing)</>}
-          {env.minLotSqft ? <> · min lot {env.minLotSqft.toLocaleString()} sqft</> : null}
-          {" "}· up to <strong>{env.maxLots} lot{env.maxLots > 1 ? "s" : ""}</strong>, <strong>{env.maxUnitsPerLot} units/lot</strong>, <strong>{env.maxAdusPerLot} ADUs</strong>
-          {env.verified === "unverified" && <span className="text-orange-500 font-semibold"> · UNVERIFIED zone data</span>}
-        </p>
-      </div>
-
-      {/* ── Quick tweaks — the numbers investors argue about most ────────── */}
-      <div className="mt-3">
+      {/* ── Quick tweaks — the numbers investors argue about most ──────────
+          Prominent, directly under the verdict: change an assumption and the
+          verdict above + every scenario below re-price instantly. */}
+      <div className="mt-3 rounded-2xl overflow-hidden border-2 border-emerald-200 dark:border-emerald-800/60 bg-white dark:bg-slate-800 shadow-sm">
         <button
           onClick={() => setTweaksOpen(!tweaksOpen)}
-          className={`w-full flex items-center justify-between px-4 py-2.5 rounded-2xl border text-xs font-semibold transition-colors ${
-            tweaksActive
-              ? "bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300"
-              : "bg-white dark:bg-slate-800 border-gray-200 dark:border-slate-700 text-gray-600 dark:text-gray-300"
-          }`}
+          className="w-full flex items-center justify-between px-4 py-3 bg-gradient-to-r from-emerald-50 to-teal-50 dark:from-emerald-900/30 dark:to-teal-900/30 text-sm font-bold text-emerald-800 dark:text-emerald-300"
         >
           <span className="flex items-center gap-2">
-            <SlidersHorizontal size={13} />
-            Quick tweaks — build sqft, $/sqft, financing
+            <SlidersHorizontal size={15} />
+            Quick tweaks
+            <span className="font-medium text-emerald-600/80 dark:text-emerald-400/80 text-xs hidden sm:inline">
+              — sqft, price, timeline, financing
+            </span>
             {tweaksActive && (
               <span className="px-1.5 py-0.5 rounded-full bg-emerald-600 text-white text-[9px] font-bold">
                 pinned
               </span>
             )}
           </span>
-          {tweaksOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          {tweaksOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
         </button>
         {tweaksOpen && (
-          <div className="mt-2 p-3 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-2xl">
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="p-3.5">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <TweakField
                 label="Build sqft"
                 unit="sqft"
@@ -394,6 +388,13 @@ export default function ScenarioBoard({
                 onCommit={(v) => v != null && onCostPerSqftChange?.(v)}
               />
               <TweakField
+                label="Total timeline"
+                unit="mo"
+                value={timelineOverride}
+                placeholder={best ? String(best.financials.timelineMonths) : "auto"}
+                onCommit={setTimelineOverride}
+              />
+              <TweakField
                 label="Down payment"
                 unit="%"
                 value={financing.downPaymentPct}
@@ -408,11 +409,11 @@ export default function ScenarioBoard({
             </div>
             <div className="flex items-center justify-between mt-2.5">
               <p className="text-[10px] text-gray-400 leading-relaxed">
-                Build sqft & sell price apply to SFR scenarios (capped by zoning). Blank = auto from comps/envelope. Every scenario below re-prices live.
+                Build sqft & sell price apply to SFR scenarios (capped by zoning); timeline pins every scenario&apos;s total (phases scale). Blank = auto. The verdict re-prices live.
               </p>
               {tweaksActive && (
                 <button
-                  onClick={() => { setSellPpsfOverride(undefined); setBuildSqftOverride(undefined); }}
+                  onClick={() => { setSellPpsfOverride(undefined); setBuildSqftOverride(undefined); setTimelineOverride(undefined); }}
                   className="text-[10px] font-semibold text-emerald-600 hover:underline flex-shrink-0 ml-3"
                 >
                   Reset
@@ -421,6 +422,18 @@ export default function ScenarioBoard({
             </div>
           </div>
         )}
+      </div>
+
+      {/* ── Zoning envelope summary ──────────────────────────────────────── */}
+      <div className="mt-3 px-1 flex items-start gap-2">
+        <Scale size={12} className="text-gray-400 flex-shrink-0 mt-0.5" />
+        <p className="text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
+          <strong className="text-gray-700 dark:text-gray-300">{env.zoningCode}</strong>
+          {env.codeSection ? <> · {env.codeSection}</> : <> · not in registry (generic parsing)</>}
+          {env.minLotSqft ? <> · min lot {env.minLotSqft.toLocaleString()} sqft</> : null}
+          {" "}· up to <strong>{env.maxLots} lot{env.maxLots > 1 ? "s" : ""}</strong>, <strong>{env.maxUnitsPerLot} units/lot</strong>, <strong>{env.maxAdusPerLot} ADUs</strong>
+          {env.verified === "unverified" && <span className="text-orange-500 font-semibold"> · UNVERIFIED zone data</span>}
+        </p>
       </div>
 
       {/* ── Exit filter ──────────────────────────────────────────────────── */}

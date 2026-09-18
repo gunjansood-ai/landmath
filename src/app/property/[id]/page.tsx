@@ -1193,14 +1193,16 @@ export default function PropertyAnalysis() {
     const pin: StrategyOverrides = {};
     if (quickPins?.sellPricePerSqft) pin.sellPricePerSqft = quickPins.sellPricePerSqft;
     if (quickPins?.sfrBuildSqft) pin.buildSqft = quickPins.sfrBuildSqft;
+    if (quickPins?.timelineMonths) pin.timelineMonths = quickPins.timelineMonths;
     if (Object.keys(pin).length === 0) return strategyOverrides;
     const merged: typeof strategyOverrides = { ...strategyOverrides };
     // buildSqft pin only maps cleanly onto the single-house fresh_build model;
-    // the sell $/sqft pin applies to split_build's new construction too.
+    // the sell $/sqft and timeline pins apply to split_build too.
     merged.fresh_build = { ...pin, ...(strategyOverrides.fresh_build ?? {}) };
-    if (pin.sellPricePerSqft) {
+    if (pin.sellPricePerSqft || pin.timelineMonths) {
       merged.split_build = {
-        sellPricePerSqft: pin.sellPricePerSqft,
+        ...(pin.sellPricePerSqft ? { sellPricePerSqft: pin.sellPricePerSqft } : {}),
+        ...(pin.timelineMonths ? { timelineMonths: pin.timelineMonths } : {}),
         ...(strategyOverrides.split_build ?? {}),
       };
     }

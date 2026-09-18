@@ -466,6 +466,8 @@ export interface OptimizerOverrides {
   sellPricePerSqft?: number;
   /** Pin main-house build sqft for SFR-type scenarios (still capped by the zoning envelope). */
   sfrBuildSqft?: number;
+  /** Pin the TOTAL project timeline in months — permit/build/sell phases scale proportionally in every scenario. */
+  timelineMonths?: number;
 }
 
 export function evaluateScenario(
@@ -648,26 +650,41 @@ export function evaluateScenario(
   // ── Timeline ──────────────────────────────────────────────────────────────
   const buildRate = BUILD_RATE_SQFT_PER_MONTH[costMultKey] ?? 400;
   const tierTime = QUALITY_TIERS[tier].timeMultiplier;
-  const permitMonths =
+  let permitMonths =
     isFlip ? 2 :
     keepHouse ? 4 :
     raw.form === "multifamily" ? 10 :
     raw.form === "townhome" || raw.form === "plex" ? 8 :
     raw.lots > 1 ? 10 : 6;
-  const buildMonths = Math.max(2, Math.ceil((totalBuildSqft / buildRate) * tierTime * (raw.lots > 1 ? 1.15 : 1)));
+  let buildMonths = Math.max(2, Math.ceil((totalBuildSqft / buildRate) * tierTime * (raw.lots > 1 ? 1.15 : 1)));
   // Sell-phase length: same days-on-market curve as calculations.ts
   // (getSellMonths — price-aware, so a $2M+ unit carries 4 months), applied to
   // PER-UNIT price, floored by the multi-unit absorption rule (more units take
   // longer to clear even when each is cheap).
   const perUnitPrice = revenue / Math.max(1, totalUnits);
-  const sellMonths =
+  let sellMonths =
     raw.exit === "hold"
       ? 2
       : Math.max(
           Math.ceil(getSellMonths(tier, perUnitPrice)),
           totalUnits > 4 ? 4 : totalUnits > 1 ? 3 : 2,
         );
-  const timelineMonths = permitMonths + buildMonths + sellMonths;
+  let timelineMonths = permitMonths + buildMonths + sellMonths;
+  // User-pinned total timeline: scale the phases proportionally so the draw
+  // schedule (and therefore construction interest) stays coherent. Minimum
+  // 3 months (1 per phase).
+  if (overrides?.timelineMonths && overrides.timelineMonths >= 3) {
+    const target = Math.round(overrides.timelineMonths);
+    const ratio = target / timelineMonths;
+    permitMonths = Math.max(1, Math.round(permitMonths * ratio));
+    buildMonths = Math.max(1, Math.round(buildMonths * ratio));
+    if (permitMonths + buildMonths >= target) {
+      buildMonths = Math.max(1, target - permitMonths - 1);
+      if (permitMonths + buildMonths >= target) permitMonths = Math.max(1, target - buildMonths - 1);
+    }
+    sellMonths = Math.max(1, target - permitMonths - buildMonths);
+    timelineMonths = permitMonths + buildMonths + sellMonths;
+  }
 
   // ── Acquisition + holding + construction financing ────────────────────────
   const closing = purchase * 0.025;
