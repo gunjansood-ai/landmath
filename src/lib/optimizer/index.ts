@@ -738,9 +738,22 @@ export function evaluateScenario(
       annualizedRoi: round1(timelineMonths > 0 ? roi * (12 / timelineMonths) : 0),
       timelineMonths,
     };
-    why.push(
-      `${totalUnits > 1 ? `${totalUnits} sellable units` : "Single sale"} at ~$${Math.round(revenue / Math.max(totalUnits, 1)).toLocaleString()} each (${ppsfOverridden ? `your pinned price $${ppsf}/sqft` : `comps: ${ppsfSourceLabel(ppsfInfo.source)} $${ppsf}/sqft`}).`,
-    );
+    const priceTag = ppsfOverridden
+      ? `your pinned price $${ppsf}/sqft`
+      : `comps: ${ppsfSourceLabel(ppsfInfo.source)} $${ppsf}/sqft`;
+    if (raw.form === "keep_dadu") {
+      // The house and the DADUs are priced on different bases — don't average
+      // them into a misleading "per unit" number.
+      const housePart = Math.round(purchase * 1.02);
+      const perDadu = Math.round(UNIT_SQFT.adu * ppsf * 0.80);
+      why.push(
+        `Existing house resells at ~$${housePart.toLocaleString()} (≈2% over today's ask) + ${raw.adusPerLot} DADU${raw.adusPerLot > 1 ? "s" : ""} at ~$${perDadu.toLocaleString()} each (80% of ${priceTag}).`,
+      );
+    } else {
+      why.push(
+        `${totalUnits > 1 ? `${totalUnits} sellable units` : "Single sale"} at ~$${Math.round(revenue / Math.max(totalUnits, 1)).toLocaleString()} each (${priceTag}).`,
+      );
+    }
   } else {
     // HOLD: stabilize, refi (BRRRR mechanics), keep the cash flow.
     const rents = getMarketRentDefaults(property.zip);

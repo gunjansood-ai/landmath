@@ -96,6 +96,8 @@ function ScenarioDetail({ s }: { s: ScenarioResult }) {
           value={formatCurrency(f.profit)}
           bold
         />
+        <Row label="ROI (on avg cash)" value={`${f.roi}%`} />
+        <Row label="Annualized ROI" value={`${f.annualizedRoi}%`} />
         {s.exit === "hold" && (
           <>
             <Row label="Gross rent" value={`${formatCurrency(f.monthlyGrossRent ?? 0)}/mo`} />
@@ -162,7 +164,7 @@ function ScenarioCard({ s, rank }: { s: ScenarioResult; rank: number }) {
               {formatCurrency(f.profit)}
             </p>
             <p className="text-[10px] text-gray-400">
-              {s.exit === "hold" ? `equity · ${((f.cashOnCash ?? 0) >= 999) ? "∞" : `${f.cashOnCash ?? 0}%`} CoC` : `${f.roi}% ROI`}
+              {s.exit === "hold" ? `equity · ${((f.cashOnCash ?? 0) >= 999) ? "∞" : `${f.cashOnCash ?? 0}%`} CoC` : `${f.roi}% ROI · ${f.annualizedRoi}%/yr`}
             </p>
           </div>
           {open ? <ChevronUp size={16} className="text-gray-300 flex-shrink-0" /> : <ChevronDown size={16} className="text-gray-300 flex-shrink-0" />}
@@ -215,7 +217,7 @@ function TweakField({
 
 export default function ScenarioBoard({
   property, tier, costPerSqft, financing,
-  onCostPerSqftChange, onFinancingChange, onBestChange,
+  onCostPerSqftChange, onFinancingChange, onBestChange, onOverridesChange,
 }: {
   property: PropertyData;
   tier: QualityTier;
@@ -224,6 +226,9 @@ export default function ScenarioBoard({
   onCostPerSqftChange?: (v: number) => void;
   onFinancingChange?: (f: FinancingConfig) => void;
   onBestChange?: (best: ScenarioResult | null) => void;
+  /** Fires when the user pins/unpins quick-tweak overrides, so the page can
+   *  keep the legacy engine (workbench, share, lender report) in sync. */
+  onOverridesChange?: (o: OptimizerOverrides) => void;
 }) {
   const [exitFilter, setExitFilter] = useState<"all" | ScenarioExit>("all");
   const [showLongShots, setShowLongShots] = useState(false);
@@ -251,6 +256,7 @@ export default function ScenarioBoard({
 
   // Surface the current best play to the page (AI narrator, share, etc.)
   useEffect(() => { onBestChange?.(report.best); }, [report.best, onBestChange]);
+  useEffect(() => { onOverridesChange?.(overrides); }, [overrides, onOverridesChange]);
 
   const filtered = useMemo(
     () => report.scenarios.filter((s) => exitFilter === "all" || s.exit === exitFilter),

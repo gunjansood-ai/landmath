@@ -184,7 +184,7 @@ function SensTable({ rows }: { rows: SensitivityRow[] }) {
                 {r.label}
               </td>
               <td style={{ padding: "5px 8px", textAlign: "right" }}>
-                {formatCurrency(r.profit + (/* totalProjectCost */ 0))}
+                {formatCurrency(r.salePrice)}
               </td>
               <td
                 style={{

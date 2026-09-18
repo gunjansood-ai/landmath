@@ -12,6 +12,8 @@ export interface SensitivityRow {
   label: string;
   saleChange: number;   // % change to sale price  (-0.20, -0.10, 0, +0.10, +0.20)
   costChange: number;   // % change to construction cost
+  /** The adjusted sale price for this scenario (base × (1 + saleChange)). */
+  salePrice: number;
   profit: number;
   roi: number;
   annualizedRoi: number;
@@ -24,9 +26,17 @@ export function buildSensitivityTable(base: AnalysisResult): SensitivityRow[] {
   return changes.map((delta) => {
     const adjSalePrice = base.expectedSalePrice * (1 + delta);
     const profit = adjSalePrice - base.totalProjectCost;
+    // Same denominator as the headline ROI: recover it from the base result's
+    // own profit/ROI pair (profit ÷ roi = cash basis), held constant across
+    // sale-price scenarios, so the base-case row MATCHES the executive-summary
+    // ROI instead of quietly using a different formula.
+    const headlineCashBasis =
+      base.roi !== 0 ? Math.abs(base.profit / (base.roi / 100)) : 0;
     const totalCash =
-      base.totalProjectCost -
-      base.acquisitionCost * (1 - (base.financing?.downPaymentPct ?? 20) / 100);
+      headlineCashBasis > 0
+        ? headlineCashBasis
+        : base.totalProjectCost -
+          base.acquisitionCost * (1 - (base.financing?.downPaymentPct ?? 20) / 100);
     const roi = totalCash > 0 ? (profit / totalCash) * 100 : 0;
     const annualizedRoi =
       base.timelineMonths > 0 ? roi * (12 / base.timelineMonths) : 0;
@@ -41,6 +51,7 @@ export function buildSensitivityTable(base: AnalysisResult): SensitivityRow[] {
           : `${Math.round(delta * 100)}% Sale Price`,
       saleChange: delta,
       costChange: 0,
+      salePrice: adjSalePrice,
       profit,
       roi,
       annualizedRoi,

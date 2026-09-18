@@ -33,7 +33,7 @@ import LenderReport from "@/components/LenderReport";
 import DownloadReportButton from "@/components/DownloadReportButton";
 import FeasibilityReasoningModal from "@/components/FeasibilityReasoningModal";
 import ScenarioBoard from "@/components/ScenarioBoard";
-import type { ScenarioResult } from "@/lib/optimizer";
+import type { OptimizerOverrides, ScenarioResult } from "@/lib/optimizer";
 import {
   useStore,
   Strategy,
@@ -1151,6 +1151,8 @@ export default function PropertyAnalysis() {
   // The scenario optimizer's current winner — feeds the AI narrator so the
   // write-up matches the "Best play" verdict on screen.
   const [optimizerBest, setOptimizerBest] = useState<ScenarioResult | null>(null);
+  // Quick-tweak pins from the ScenarioBoard (sell $/sqft, build sqft).
+  const [quickPins, setQuickPins] = useState<OptimizerOverrides | null>(null);
   const [showComps, setShowComps] = useState(false);
 
   // New strategy inputs — seed MF rents from ZIP table immediately so the form
@@ -1182,10 +1184,33 @@ export default function PropertyAnalysis() {
   }, [property, listPriceOverride]);
 
   // Core 4 strategies
+  //
+  // Quick-tweak pins from the ScenarioBoard (sell $/sqft, build sqft) flow
+  // into the legacy engine too, so the workbench, share text, and Download
+  // Report tell the SAME story as the optimizer verdict. A per-strategy
+  // workbench override is more specific and still wins over a pin.
+  const mergedOverrides = useMemo(() => {
+    const pin: StrategyOverrides = {};
+    if (quickPins?.sellPricePerSqft) pin.sellPricePerSqft = quickPins.sellPricePerSqft;
+    if (quickPins?.sfrBuildSqft) pin.buildSqft = quickPins.sfrBuildSqft;
+    if (Object.keys(pin).length === 0) return strategyOverrides;
+    const merged: typeof strategyOverrides = { ...strategyOverrides };
+    // buildSqft pin only maps cleanly onto the single-house fresh_build model;
+    // the sell $/sqft pin applies to split_build's new construction too.
+    merged.fresh_build = { ...pin, ...(strategyOverrides.fresh_build ?? {}) };
+    if (pin.sellPricePerSqft) {
+      merged.split_build = {
+        sellPricePerSqft: pin.sellPricePerSqft,
+        ...(strategyOverrides.split_build ?? {}),
+      };
+    }
+    return merged;
+  }, [strategyOverrides, quickPins]);
+
   const { analyses: coreAnalyses, recommended } = useMemo(() => {
     if (!effectiveProperty) return { analyses: [], recommended: "pass" as Strategy };
-    return analyzeAllStrategies(effectiveProperty, qualityTier, costPerSqft, financing, strategyOverrides);
-  }, [effectiveProperty, qualityTier, costPerSqft, financing, strategyOverrides]);
+    return analyzeAllStrategies(effectiveProperty, qualityTier, costPerSqft, financing, mergedOverrides);
+  }, [effectiveProperty, qualityTier, costPerSqft, financing, mergedOverrides]);
 
   // Townhome analysis
   const townhomeAnalysis = useMemo(() => {
@@ -1403,6 +1428,7 @@ export default function PropertyAnalysis() {
             onCostPerSqftChange={setCostPerSqft}
             onFinancingChange={setFinancing}
             onBestChange={setOptimizerBest}
+            onOverridesChange={setQuickPins}
           />
         )}
 
