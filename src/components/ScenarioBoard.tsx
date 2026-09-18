@@ -13,7 +13,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Trophy, ChevronDown, ChevronUp, Scale, TrendingUp, Clock,
   AlertTriangle, ExternalLink, Layers, Home, Building2, Hammer,
-  CircleDollarSign, KeyRound, SlidersHorizontal,
+  CircleDollarSign, KeyRound, SlidersHorizontal, HelpCircle,
 } from "lucide-react";
 import type { PropertyData, QualityTier, FinancingConfig } from "@/store/useStore";
 import { formatCurrency, getDefaultSellPricePerSqft } from "@/lib/calculations";
@@ -70,43 +70,103 @@ function MetricChip({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Row({ label, value, bold }: { label: string; value: string; bold?: boolean }) {
+/** Small "?" that reveals a how-is-this-calculated tooltip on hover (desktop)
+ *  or tap (mobile). stopPropagation so tapping it doesn't collapse the card. */
+function Hint({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="flex justify-between py-1">
-      <span className={`text-xs ${bold ? "font-bold text-gray-900 dark:text-white" : "text-gray-500 dark:text-gray-400"}`}>{label}</span>
-      <span className={`text-xs ${bold ? "font-bold text-gray-900 dark:text-white" : "font-medium text-gray-700 dark:text-gray-300"}`}>{value}</span>
+    <span className="relative inline-flex items-center">
+      <button
+        type="button"
+        aria-label="How this is calculated"
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        className="ml-1 text-gray-300 dark:text-gray-500 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors"
+      >
+        <HelpCircle size={11} />
+      </button>
+      {open && (
+        <span className="absolute left-0 bottom-full mb-1.5 z-30 w-64 p-2.5 rounded-lg bg-gray-900 dark:bg-black text-gray-100 text-[10px] leading-relaxed shadow-xl pointer-events-none whitespace-normal">
+          {text}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function Row({ label, value, bold, hint }: { label: string; value: string; bold?: boolean; hint?: string }) {
+  return (
+    <div className="flex justify-between items-start py-1">
+      <span className={`text-xs flex items-center ${bold ? "font-bold text-gray-900 dark:text-white" : "text-gray-500 dark:text-gray-400"}`}>
+        {label}
+        {hint && <Hint text={hint} />}
+      </span>
+      <span className={`text-xs text-right ${bold ? "font-bold text-gray-900 dark:text-white" : "font-medium text-gray-700 dark:text-gray-300"}`}>{value}</span>
     </div>
   );
 }
 
 function ScenarioDetail({ s }: { s: ScenarioResult }) {
   const f = s.financials;
+  const avgCash = f.avgCashDeployed ?? f.totalCashInvested;
+  const blendedPpsf = s.totalBuildSqft > 0 ? Math.round(f.revenue / s.totalBuildSqft) : 0;
+
+  // How-is-this-calculated hints, with this scenario's actual numbers.
+  const hints = {
+    revenue:
+      s.exit === "hold"
+        ? `Stabilized value for the refi appraisal: the LOWER of income value (NOI ÷ cap rate) and 95% of what the units would sell for — lenders appraise small residential off comps, not just cap rates.`
+        : s.form === "keep_dadu"
+        ? `Existing house at ~2% over today's ask + DADUs at 80% of the sale $/sqft. The house isn't rebuilt, so it doesn't reprice at new-construction $/sqft.`
+        : `${s.totalBuildSqft.toLocaleString()} sqft × ~$${blendedPpsf.toLocaleString()}/sqft blended. Main-house sqft sells at full $/sqft (comps or your pin); ADU sqft at 85%, plex 85%, townhome 90%, apartment condo-exit 80%.`,
+    acquisition: `Purchase price + ~2.5% closing costs (title, escrow, inspection) + any loan origination points.`,
+    construction: `Hard cost (build sqft × build cost $/sqft) + demo $20k (if tearing down) + permits ($20k + $3k per unit) + architect/engineering 5% of hard cost + contingency 12% + landscaping ($15k + $3k per unit)${s.lots > 1 ? " + short-plat survey/engineering/utility stubs" : ""}${s.form === "townhome" ? " + unit-lot subdivision" : ""}.`,
+    holding: `Every month for ${f.timelineMonths} months: acquisition mortgage payment + property tax + insurance (0.4%/yr) + $300 utilities. Plus construction-loan interest charged only on the DRAWN balance (S-curve draw schedule, default 80% LTC) and loan origination points.`,
+    selling: `7.8% of sale price — 5% agent commission + 1.8% WA excise tax (REET) + 1% seller concessions — plus $5k staging. Here: 7.8% × ${formatCurrency(f.revenue)} + $5,000.`,
+    peakCash: `The most cash tied up at once: down payment + closing costs + your equity share of construction (the ~20% the construction loan doesn't cover) + all holding costs.`,
+    avgCash: `Month-by-month average of cash actually tied up, per the draw schedule — capital ramps in as the build progresses, so the average (${formatCurrency(avgCash)}) sits well below peak (${formatCurrency(f.totalCashInvested)}). This is the ROI denominator.`,
+    profit:
+      s.exit === "hold"
+        ? `Stabilized value − total project cost (acquisition + construction + holding). This is equity created, realized via the refi, not a cash sale.`
+        : `${formatCurrency(f.revenue)} sale − ${formatCurrency(f.totalProjectCost)} all-in cost (acquisition + construction + holding + selling).`,
+    roi: `${formatCurrency(f.profit)} profit ÷ ${formatCurrency(avgCash)} avg cash deployed. Uses average (not peak) cash, since that's what was actually tied up over the project's life.`,
+    annualized: `ROI × 12 ÷ ${f.timelineMonths} months — what the same return equals per year, for comparing deals with different timelines.`,
+    grossRent: `ZIP-level market rents applied to the unit mix (main house, ADUs, or per-unit for plex/MF).`,
+    noi: `Gross rent × 12, less 5% vacancy, less ${s.form === "multifamily" ? "35%" : "30%"} operating expenses (tax, insurance, maintenance, management). Cap rate is the market yield for this asset type.`,
+    refi: `Cash-out refinance at 72% of stabilized value once leased (BRRRR). Proceeds first pay off the acquisition + construction loans; the rest returns your cash.`,
+    cashLeft: `Cash you put in, minus what the refi returned. Smaller is better — $0 means infinite cash-on-cash.`,
+    cashFlow: `NOI − annual debt service on the refi loan (30-yr at ~0.4% above your rate). CoC = cash flow ÷ cash left in deal.`,
+  };
+
   return (
     <div className="px-4 pb-4 border-t border-gray-100 dark:border-slate-700/60">
       <div className="pt-3 space-y-0.5">
-        <Row label={s.exit === "hold" ? "Stabilized value" : "Sale revenue"} value={formatCurrency(f.revenue)} />
-        <Row label="Acquisition (incl. closing)" value={formatCurrency(f.acquisitionCost)} />
-        <Row label="Construction (all-in)" value={formatCurrency(f.constructionCost)} />
-        <Row label="Holding + loan costs" value={formatCurrency(f.holdingCost)} />
-        {s.exit === "sell" && <Row label="Selling costs" value={formatCurrency(f.sellingCosts)} />}
-        <Row label="Cash required (peak)" value={formatCurrency(f.totalCashInvested)} />
-        <Row label="Avg cash deployed (ROI basis)" value={formatCurrency(f.avgCashDeployed ?? f.totalCashInvested)} />
+        <Row label={s.exit === "hold" ? "Stabilized value" : "Sale revenue"} value={formatCurrency(f.revenue)} hint={hints.revenue} />
+        <Row label="Acquisition (incl. closing)" value={formatCurrency(f.acquisitionCost)} hint={hints.acquisition} />
+        <Row label="Construction (all-in)" value={formatCurrency(f.constructionCost)} hint={hints.construction} />
+        <Row label="Holding + loan costs" value={formatCurrency(f.holdingCost)} hint={hints.holding} />
+        {s.exit === "sell" && <Row label="Selling costs" value={formatCurrency(f.sellingCosts)} hint={hints.selling} />}
+        <Row label="Cash required (peak)" value={formatCurrency(f.totalCashInvested)} hint={hints.peakCash} />
+        <Row label="Avg cash deployed (ROI basis)" value={formatCurrency(avgCash)} hint={hints.avgCash} />
         <Row
           label={s.exit === "hold" ? "Equity created" : "Net profit"}
           value={formatCurrency(f.profit)}
           bold
+          hint={hints.profit}
         />
-        <Row label="ROI (on avg cash)" value={`${f.roi}%`} />
-        <Row label="Annualized ROI" value={`${f.annualizedRoi}%`} />
+        <Row label="ROI (on avg cash)" value={`${f.roi}%`} hint={hints.roi} />
+        <Row label="Annualized ROI" value={`${f.annualizedRoi}%`} hint={hints.annualized} />
         {s.exit === "hold" && (
           <>
-            <Row label="Gross rent" value={`${formatCurrency(f.monthlyGrossRent ?? 0)}/mo`} />
-            <Row label="NOI / cap rate" value={`${formatCurrency(f.noi ?? 0)} @ ${f.capRate}%`} />
-            <Row label="Refi loan (72% LTV)" value={formatCurrency(f.refiLoan ?? 0)} />
-            <Row label="Cash left in deal after refi" value={formatCurrency(f.cashLeftInDeal ?? 0)} />
+            <Row label="Gross rent" value={`${formatCurrency(f.monthlyGrossRent ?? 0)}/mo`} hint={hints.grossRent} />
+            <Row label="NOI / cap rate" value={`${formatCurrency(f.noi ?? 0)} @ ${f.capRate}%`} hint={hints.noi} />
+            <Row label="Refi loan (72% LTV)" value={formatCurrency(f.refiLoan ?? 0)} hint={hints.refi} />
+            <Row label="Cash left in deal after refi" value={formatCurrency(f.cashLeftInDeal ?? 0)} hint={hints.cashLeft} />
             <Row
               label="Annual cash flow / CoC"
               value={`${formatCurrency(f.annualCashFlow ?? 0)}${(f.cashOnCash ?? 0) > 0 && (f.cashOnCash ?? 0) < 999 ? ` (${f.cashOnCash}%)` : (f.cashOnCash ?? 0) >= 999 ? " (∞ — no cash left in)" : ""}`}
+              hint={hints.cashFlow}
             />
           </>
         )}
