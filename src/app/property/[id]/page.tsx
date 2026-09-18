@@ -1196,18 +1196,26 @@ export default function PropertyAnalysis() {
     if (quickPins?.timelineMonths) pin.timelineMonths = quickPins.timelineMonths;
     if (Object.keys(pin).length === 0) return strategyOverrides;
     const merged: typeof strategyOverrides = { ...strategyOverrides };
-    // buildSqft pin only maps cleanly onto the single-house fresh_build model;
-    // the sell $/sqft and timeline pins apply to split_build too.
+    // buildSqft pin = MAIN-house sqft. fresh_build takes it directly;
+    // main_adu's legacy buildSqft is main + ADUs, so add the ADU sqft the
+    // legacy model assumes (min(1000, 10% of lot) × 1-2 ADUs by lot size).
     merged.fresh_build = { ...pin, ...(strategyOverrides.fresh_build ?? {}) };
-    if (pin.sellPricePerSqft || pin.timelineMonths) {
-      merged.split_build = {
-        ...(pin.sellPricePerSqft ? { sellPricePerSqft: pin.sellPricePerSqft } : {}),
-        ...(pin.timelineMonths ? { timelineMonths: pin.timelineMonths } : {}),
-        ...(strategyOverrides.split_build ?? {}),
-      };
+    const nonBuildPin: StrategyOverrides = {
+      ...(pin.sellPricePerSqft ? { sellPricePerSqft: pin.sellPricePerSqft } : {}),
+      ...(pin.timelineMonths ? { timelineMonths: pin.timelineMonths } : {}),
+    };
+    if (Object.keys(nonBuildPin).length > 0) {
+      merged.split_build = { ...nonBuildPin, ...(strategyOverrides.split_build ?? {}) };
     }
+    const lot = effectiveProperty?.lotSizeSqft ?? 0;
+    const aduTotal = lot > 0 ? Math.min(1000, lot * 0.1) * (lot >= 8000 ? 2 : 1) : 0;
+    merged.main_adu = {
+      ...nonBuildPin,
+      ...(pin.buildSqft && lot > 0 ? { buildSqft: Math.round(pin.buildSqft + aduTotal) } : {}),
+      ...(strategyOverrides.main_adu ?? {}),
+    };
     return merged;
-  }, [strategyOverrides, quickPins]);
+  }, [strategyOverrides, quickPins, effectiveProperty]);
 
   const { analyses: coreAnalyses, recommended } = useMemo(() => {
     if (!effectiveProperty) return { analyses: [], recommended: "pass" as Strategy };

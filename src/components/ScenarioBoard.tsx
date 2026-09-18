@@ -13,7 +13,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Trophy, ChevronDown, ChevronUp, Scale, TrendingUp, Clock,
   AlertTriangle, ExternalLink, Layers, Home, Building2, Hammer,
-  CircleDollarSign, KeyRound, SlidersHorizontal, HelpCircle,
+  CircleDollarSign, KeyRound, SlidersHorizontal, HelpCircle, ArrowUpToLine, Undo2,
 } from "lucide-react";
 import type { PropertyData, QualityTier, FinancingConfig } from "@/store/useStore";
 import { formatCurrency, getDefaultSellPricePerSqft } from "@/lib/calculations";
@@ -197,12 +197,21 @@ function ScenarioDetail({ s }: { s: ScenarioResult }) {
   );
 }
 
-function ScenarioCard({ s, rank }: { s: ScenarioResult; rank: number }) {
+function ScenarioCard({
+  s, rank, isRecommended, onPromote,
+}: {
+  s: ScenarioResult;
+  rank: number;
+  /** This is LandMath's own top pick (shown when the user has promoted a different one). */
+  isRecommended?: boolean;
+  /** Move this scenario into the hero spot. */
+  onPromote?: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const Icon = FORM_ICON[s.form];
   const f = s.financials;
   return (
-    <div className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-2xl overflow-hidden">
+    <div className={`bg-white dark:bg-slate-800 border rounded-2xl overflow-hidden ${isRecommended ? "border-emerald-300 dark:border-emerald-700" : "border-gray-100 dark:border-slate-700"}`}>
       <button onClick={() => setOpen(!open)} className="w-full text-left px-4 py-3 active:bg-gray-50 dark:active:bg-slate-700/40">
         <div className="flex items-center gap-3">
           <div className="flex-shrink-0 w-8 h-8 rounded-xl bg-gray-100 dark:bg-slate-700 flex items-center justify-center text-[11px] font-bold text-gray-500 dark:text-gray-300">
@@ -214,6 +223,11 @@ function ScenarioCard({ s, rank }: { s: ScenarioResult; rank: number }) {
               <p className="text-[13px] font-semibold text-gray-900 dark:text-white truncate">{s.label}</p>
             </div>
             <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+              {isRecommended && (
+                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                  <Trophy size={9} /> LandMath pick
+                </span>
+              )}
               <ConfidencePill s={s} />
               <FeasBadge s={s} />
               <span className="text-[10px] text-gray-400">{f.timelineMonths} mo</span>
@@ -230,6 +244,16 @@ function ScenarioCard({ s, rank }: { s: ScenarioResult; rank: number }) {
           {open ? <ChevronUp size={16} className="text-gray-300 flex-shrink-0" /> : <ChevronDown size={16} className="text-gray-300 flex-shrink-0" />}
         </div>
       </button>
+      {onPromote && (
+        <div className="px-4 pb-2 -mt-1">
+          <button
+            onClick={(e) => { e.stopPropagation(); onPromote(); }}
+            className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 hover:underline"
+          >
+            <ArrowUpToLine size={11} /> Make this my plan
+          </button>
+        </div>
+      )}
       {open && <ScenarioDetail s={s} />}
     </div>
   );
@@ -319,8 +343,26 @@ export default function ScenarioBoard({
     [property, tier, costPerSqft, financing, overrides],
   );
 
-  // Surface the current best play to the page (AI narrator, share, etc.)
-  useEffect(() => { onBestChange?.(report.best); }, [report.best, onBestChange]);
+  // User-promoted scenario: LandMath still sorts by its recommendation, but
+  // the user can pin the plan THEY intend to execute into the hero spot.
+  const [promotedId, setPromotedId] = useState<string | null>(null);
+  const allScenarios = useMemo(
+    () => report.scenarios.concat(report.longShots),
+    [report],
+  );
+  const promoted = useMemo(
+    () => (promotedId ? allScenarios.find((s) => s.id === promotedId) ?? null : null),
+    [promotedId, allScenarios],
+  );
+  const { best } = report;
+  // The hero = the user's pick when set (ids are stable across re-pricing,
+  // so it survives quick-tweak changes), else LandMath's recommendation.
+  const hero = promoted ?? best;
+  const heroIsUserPick = promoted != null && promoted.id !== best?.id;
+
+  // Surface the hero (what the user is actually planning) to the page —
+  // the AI narrator and share flow describe THIS scenario.
+  useEffect(() => { onBestChange?.(hero); }, [hero, onBestChange]);
   useEffect(() => { onOverridesChange?.(overrides); }, [overrides, onOverridesChange]);
 
   const filtered = useMemo(
@@ -328,14 +370,14 @@ export default function ScenarioBoard({
     [report.scenarios, exitFilter],
   );
 
-  const { best } = report;
   const env = report.envelopeSummary;
 
-  // The winner is expanded up top — the ranked list shows the OTHER top 3,
-  // with the rest behind a "show all" toggle.
+  // The hero is expanded up top — the ranked list shows the OTHER top 3,
+  // with the rest behind a "show all" toggle. When the user has promoted a
+  // scenario, LandMath's own pick shows in the list with a badge.
   const others = useMemo(
-    () => filtered.filter((s) => s.id !== best?.id),
-    [filtered, best],
+    () => filtered.filter((s) => s.id !== hero?.id),
+    [filtered, hero],
   );
   const visibleOthers = showAllScenarios ? others : others.slice(0, 3);
   const hiddenCount = others.length - 3;
@@ -343,48 +385,73 @@ export default function ScenarioBoard({
 
   return (
     <section className="mb-6">
-      {/* ── Verdict hero ─────────────────────────────────────────────────── */}
-      {best ? (
-        <div className="rounded-3xl overflow-hidden bg-gradient-to-br from-emerald-600 via-emerald-700 to-teal-800 text-white shadow-lg">
+      {/* ── Verdict hero — LandMath's pick, or the user's promoted plan ──── */}
+      {hero ? (
+        <div className={`rounded-3xl overflow-hidden text-white shadow-lg bg-gradient-to-br ${
+          heroIsUserPick
+            ? "from-indigo-600 via-indigo-700 to-violet-800"
+            : "from-emerald-600 via-emerald-700 to-teal-800"
+        }`}>
           <div className="px-5 pt-5 pb-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Trophy size={14} className="text-amber-300" />
-              <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-100">Best play for this land</p>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                {heroIsUserPick ? (
+                  <ArrowUpToLine size={14} className="text-amber-300" />
+                ) : (
+                  <Trophy size={14} className="text-amber-300" />
+                )}
+                <p className="text-[10px] font-bold uppercase tracking-widest text-white/80">
+                  {heroIsUserPick ? "Your plan" : "Best play for this land"}
+                </p>
+              </div>
+              {heroIsUserPick && (
+                <button
+                  onClick={() => setPromotedId(null)}
+                  className="inline-flex items-center gap-1 text-[10px] font-semibold text-white/85 hover:text-white bg-white/15 px-2 py-1 rounded-full"
+                >
+                  <Undo2 size={10} /> Back to LandMath&apos;s pick
+                </button>
+              )}
             </div>
-            <h2 className="text-lg font-bold leading-snug mb-1">{best.label}</h2>
+            {heroIsUserPick && best && (
+              <p className="text-[10px] text-white/70 -mt-1 mb-1.5">
+                LandMath&apos;s pick is {best.shortLabel} at {formatCurrency(best.financials.profit)} — shown below.
+              </p>
+            )}
+            <h2 className="text-lg font-bold leading-snug mb-1">{hero.label}</h2>
             <p className="text-3xl font-extrabold tracking-tight">
-              {formatCurrency(best.financials.profit)}
-              <span className="text-sm font-semibold text-emerald-200 ml-2">
-                {best.exit === "hold" ? "equity created" : "projected profit"}
+              {formatCurrency(hero.financials.profit)}
+              <span className="text-sm font-semibold text-white/75 ml-2">
+                {hero.exit === "hold" ? "equity created" : "projected profit"}
               </span>
             </p>
             <div className="flex gap-2 mt-3 overflow-x-auto scrollbar-hide">
-              <MetricChip label="ROI" value={`${best.financials.roi}%`} />
-              <MetricChip label="Annualized" value={`${best.financials.annualizedRoi}%`} />
-              <MetricChip label="Timeline" value={`${best.financials.timelineMonths} mo`} />
-              <MetricChip label="Cash needed" value={formatCurrency(best.financials.totalCashInvested)} />
-              {best.exit === "hold" && (
-                <MetricChip label="Cash flow" value={`${formatCurrency(best.financials.annualCashFlow ?? 0)}/yr`} />
+              <MetricChip label="ROI" value={`${hero.financials.roi}%`} />
+              <MetricChip label="Annualized" value={`${hero.financials.annualizedRoi}%`} />
+              <MetricChip label="Timeline" value={`${hero.financials.timelineMonths} mo`} />
+              <MetricChip label="Cash needed" value={formatCurrency(hero.financials.totalCashInvested)} />
+              {hero.exit === "hold" && (
+                <MetricChip label="Cash flow" value={`${formatCurrency(hero.financials.annualCashFlow ?? 0)}/yr`} />
               )}
             </div>
             <div className="flex items-center gap-1.5 mt-3 flex-wrap">
-              <ConfidencePill s={best} />
-              <FeasBadge s={best} />
-              <span className="text-[10px] text-emerald-100/80">
-                {best.totalUnits} unit{best.totalUnits > 1 ? "s" : ""} · {best.totalBuildSqft.toLocaleString()} sqft new
+              <ConfidencePill s={hero} />
+              <FeasBadge s={hero} />
+              <span className="text-[10px] text-white/70">
+                {hero.totalUnits} unit{hero.totalUnits > 1 ? "s" : ""} · {hero.totalBuildSqft.toLocaleString()} sqft new
               </span>
             </div>
           </div>
           <button
             onClick={() => setBestOpen(!bestOpen)}
-            className="w-full px-5 py-2.5 bg-black/15 text-left flex items-center justify-between text-xs font-semibold text-emerald-50"
+            className="w-full px-5 py-2.5 bg-black/15 text-left flex items-center justify-between text-xs font-semibold text-white/90"
           >
-            Why this wins + full numbers
+            {heroIsUserPick ? "Full numbers for your plan" : "Why this wins + full numbers"}
             {bestOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           </button>
           {bestOpen && (
             <div className="bg-white dark:bg-slate-800 text-gray-900 dark:text-white">
-              <ScenarioDetail s={best} />
+              <ScenarioDetail s={hero} />
             </div>
           )}
         </div>
@@ -524,7 +591,13 @@ export default function ScenarioBoard({
       )}
       <div className="space-y-2">
         {visibleOthers.map((s, i) => (
-          <ScenarioCard key={s.id} s={s} rank={i + 2} />
+          <ScenarioCard
+            key={s.id}
+            s={s}
+            rank={i + 2}
+            isRecommended={heroIsUserPick && s.id === best?.id}
+            onPromote={() => { setPromotedId(s.id); setBestOpen(true); }}
+          />
         ))}
         {filtered.length === 0 && report.scenarios.length > 0 && (
           <p className="text-xs text-gray-400 text-center py-3">No {exitFilter === "hold" ? "hold" : "sell"} scenarios at medium+ confidence.</p>
@@ -554,7 +627,12 @@ export default function ScenarioBoard({
           {showLongShots && (
             <div className="space-y-2 mt-2">
               {report.longShots.map((s, i) => (
-                <ScenarioCard key={s.id} s={s} rank={report.scenarios.length + i + 1} />
+                <ScenarioCard
+                  key={s.id}
+                  s={s}
+                  rank={report.scenarios.length + i + 1}
+                  onPromote={() => { setPromotedId(s.id); setBestOpen(true); }}
+                />
               ))}
             </div>
           )}
